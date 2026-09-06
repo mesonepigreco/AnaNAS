@@ -1,0 +1,26 @@
+# Binaries
+/nas-sync
+/bin/
+/dist/
+*.exe
+
+# Go build/test artifacts
+*.test
+*.out
+coverage.*
+vendor/
+
+# Local runtime state (index DB, caches, config with secrets)
+/.nas-sync/
+*.db
+*.db-*
+/data/
+config.local.*
+*.secret
+
+# Editor/OS noise
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/

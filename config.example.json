@@ -1,0 +1,31 @@
+{
+  "local": {
+    "root": "/home/me/Documents/sync"
+  },
+  "nas": {
+    "host": "192.168.1.50",
+    "share": "nas-sync",
+    "mountPoint": "/mnt/nas-sync",
+    "protocol": "smb"
+  },
+  "remote": {
+    "enabled": false,
+    "host": "nas.example.com",
+    "port": 22,
+    "user": "darth",
+    "keyFile": "/home/me/.ssh/id_ed25519",
+    "knownHosts": "/home/me/.ssh/known_hosts"
+  },
+  "coalesce": {
+    "idle": "1.5s",
+    "maxWait": "5s"
+  },
+  "selectiveSync": {
+    "excludeLocal": ["node_modules/", "*.tmp"],
+    "excludeRemote": []
+  },
+  "lanGuard": true,
+  "scanRemote": "60s",
+  "blockSize": 65536,
+  "webPort": 8721
+}
