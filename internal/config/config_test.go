@@ -26,6 +26,9 @@ func TestDefaultsValid(t *testing.T) {
 	if cfg.BlockSize != 64*1024 {
 		t.Fatalf("unexpected block size %d", cfg.BlockSize)
 	}
+	if cfg.WebPort != 0 {
+		t.Fatalf("web UI should be opt-in by default, got port %d", cfg.WebPort)
+	}
 }
 
 func TestLoadMissingFileYieldsDefaults(t *testing.T) {

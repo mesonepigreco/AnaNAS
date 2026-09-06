@@ -130,14 +130,15 @@ type Config struct {
 	StateDir string `json:"stateDir"`
 	Limits   Limits `json:"limits"`
 	// ScanRemote is how often out-of-band remote changes are probed in LAN mode.
-	ScanRemote Duration      `json:"scanRemote"`
-	BlockSize  int           `json:"blockSize"`
-	WebPort    int           `json:"webPort"`
-	NAS        NAS           `json:"nas"`
-	Remote     Remote        `json:"remote"`
-	Local      Local         `json:"local"`
-	Coalesce   Coalesce      `json:"coalesce"`
-	Selective  SelectiveSync `json:"selectiveSync"`
+	ScanRemote Duration `json:"scanRemote"`
+	BlockSize  int      `json:"blockSize"`
+	// WebPort is the loopback-only status UI port. Zero disables the UI.
+	WebPort   int           `json:"webPort"`
+	NAS       NAS           `json:"nas"`
+	Remote    Remote        `json:"remote"`
+	Local     Local         `json:"local"`
+	Coalesce  Coalesce      `json:"coalesce"`
+	Selective SelectiveSync `json:"selectiveSync"`
 }
 
 // DefaultPath returns the conventional configuration file location.
@@ -157,7 +158,7 @@ func Default() *Config {
 		LANGuard:   true,
 		ScanRemote: Duration(15 * time.Minute),
 		BlockSize:  64 * 1024, // 64 KiB content blocks (BLAKE3 digests)
-		WebPort:    8721,
+		WebPort:    0,
 		Limits:     Limits{ReadBytesPerSecond: 20 << 20, ScanOpsPerSecond: 50, MaxWatches: 100000, CacheBytes: 1 << 30},
 		NAS: NAS{
 			Protocol: "smb",

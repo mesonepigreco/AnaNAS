@@ -18,9 +18,10 @@ guarantee.
 
 The implemented program is a lightweight local metadata observer. It uses recursive
 inotify watches, a persistent bbolt index, bounded event coalescing and paced scans.
-It does not yet implement bidirectional content synchronization, NAS-side diff
-materialization, the web UI, or SSH/SFTP actions. `automaticWrites` must remain false
-until the M2 protocol and egress gates are complete.
+It includes an opt-in, loopback-only read-only status UI, but does not yet implement
+bidirectional content synchronization, NAS-side diff materialization, the full web
+UI, or SSH/SFTP actions. `automaticWrites` must remain false until the M2 protocol
+and egress gates are complete.
 
 The prepared test NAS is currently:
 
@@ -116,6 +117,15 @@ Local observer and LAN diagnostics:
 contact the NAS. `-discover-nas` reads mount metadata only. `-check-lan` performs
 local route/interface/mount checks and must not ping, resolve DNS or stat an
 automount path.
+
+When `webPort` is enabled, the status surface is local-only:
+
+```sh
+curl --fail http://127.0.0.1:8721/api/status
+```
+
+Do not add external JavaScript, fonts, analytics, update checks or a non-loopback
+bind address.
 
 Real-NAS checks:
 

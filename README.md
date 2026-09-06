@@ -2,7 +2,8 @@
 
 A Go synchronizer in development, guided by [PROJECT.md](PROJECT.md) and
 [PLAN.md](PLAN.md). The implemented daemon currently **observes local metadata**.
-It does not yet sync NAS content, serve a web UI, or connect through SSH/SFTP.
+It does not yet sync NAS content or connect through SSH/SFTP. An optional read-only
+status UI binds to loopback when `webPort` is nonzero; it has no external assets.
 
 The local observer uses recursive inotify watches, a persistent bbolt index,
 bounded event coalescing and paced scans. It never reads file contents. Idle
@@ -26,6 +27,11 @@ then watches until SIGINT/SIGTERM. It reconciles on every restart to cover chang
 made while stopped. A root replacement, watch-limit failure or inaccessible path
 stops observation with a clear error; fix the cause and restart. No data is deleted.
 The process logs readiness once and does not log every file event.
+
+Set `webPort` to a nonzero port (the examples use `8721`) to enable the local
+read-only dashboard at `http://127.0.0.1:<port>/`; `0` disables it. The dashboard
+fetches only local status while its tab is visible and does not initiate NAS or WAN
+work.
 
 State defaults to `$XDG_STATE_HOME/nas-sync/<root-id>` or
 `~/.local/state/nas-sync/<root-id>`; `stateDir` overrides it. State must be outside

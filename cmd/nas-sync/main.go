@@ -15,6 +15,7 @@ import (
 	"nas-sync/internal/index"
 	"nas-sync/internal/languard"
 	"nas-sync/internal/observe"
+	"nas-sync/internal/web"
 	"os"
 	"os/signal"
 	"syscall"
@@ -163,9 +164,46 @@ func runObserver(ctx context.Context, cfg *config.Config, once bool) error {
 		return json.NewEncoder(os.Stdout).Encode(observer.Status())
 	}
 	log.Printf("observing local metadata; NAS synchronization is disabled pending capability validation")
-	err = observer.Run(ctx)
+	if cfg.WebPort == 0 {
+		err = observer.Run(ctx)
+		if ctx.Err() != nil {
+			return nil
+		}
+		return err
+	}
+	statusServer, err := web.New(cfg.WebPort, func() any { return observer.Status() })
+	if err != nil {
+		return fmt.Errorf("start local status UI: %w", err)
+	}
+	statusServer.Start()
+	log.Printf("local status UI: %s", statusServer.URL())
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	observerErr := make(chan error, 1)
+	go func() { observerErr <- observer.Run(runCtx) }()
+	var runErr error
+	observerDone := false
+	select {
+	case runErr = <-observerErr:
+		observerDone = true
+	case webErr := <-statusServer.Errors():
+		runErr = fmt.Errorf("local status UI: %w", webErr)
+	case <-ctx.Done():
+		runErr = nil
+	}
+	cancel()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer shutdownCancel()
+	if shutdownErr := statusServer.Shutdown(shutdownCtx); shutdownErr != nil && runErr == nil && ctx.Err() == nil {
+		runErr = fmt.Errorf("stop local status UI: %w", shutdownErr)
+	}
+	if !observerDone {
+		// Ensure the observer has released its watcher and index before returning.
+		runErr = <-observerErr
+	}
 	if ctx.Err() != nil {
 		return nil
 	}
-	return err
+	return runErr
 }

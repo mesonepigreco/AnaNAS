@@ -50,6 +50,9 @@ Implemented and exercised locally:
 - A persistent bbolt metadata index with logical scan IDs and dirty generations;
   recursive fsnotify observation, exclusions before traversal, paced paginated scans,
   restart recovery, directory-move handling and conservative incomplete-scan behavior.
+- A pure bounded diff planner that compares local/remote manifests against an
+  acknowledged base, classifies push/pull/conflict without choosing a conflict winner,
+  validates manifest bounds and deduplicates missing block payloads in manifest order.
 - A read-only `-check-lan` diagnostic for SMB mount/source identity and physical-interface /
   direct-route evidence. It performs no NAS probe and never enables automatic writes.
 - A `-discover-nas` command that reports kernel network mounts and user-session GVFS SMB
@@ -64,12 +67,14 @@ Go 1.27.1. See [README.md](README.md), [local measurements](docs/performance.md)
 [real-NAS validation status](docs/e2e-qnap.md). These results validate local observation,
 not the proposed synchronization protocol or the full ten-minute acceptance workloads.
 
-Remaining: content index/acknowledged sync bases, transfer scheduling and pacing,
-transport capability probes, write-capable LAN enforcement, diff materialization,
-journal/checkpoints, conflicts and paused-path resolution, retention, WAN actions and
-web UI. No NAS content is accessed or modified by the current observer. Configuration
-settings for hashing throughput, cache size, remote scans and web/SSH endpoints are
-reserved and validated where applicable; they do not enable those future features.
+Remaining: persistent content manifests/acknowledged sync bases, transfer scheduling
+and pacing, transport capability probes, write-capable LAN enforcement, diff
+materialization, journal/checkpoints, conflicts and paused-path resolution, retention,
+WAN actions and the full web UI. A loopback-only read-only status dashboard is now
+implemented; it does not initiate NAS work. No NAS content is accessed or modified by
+the current observer. Configuration settings for hashing throughput, cache size,
+remote scans and web/SSH endpoints are reserved and validated where applicable; they
+do not enable those future features.
 
 Live mount discovery now finds the dedicated kernel CIFS mount
 `//192.168.1.30/nas-sync-test` at `/mnt/nas-sync-test`, using SMB 3.1.1,
@@ -422,6 +427,13 @@ compressed rewrites, rename storms, slow storage and high-latency WAN. Reject pe
 
 ## 7. Local web UI and configuration
 
+The current implementation provides an opt-in, loopback-only read-only dashboard and
+`/api/status` endpoint. It binds only when `webPort` is nonzero, embeds its HTML/CSS/
+JavaScript, validates loopback Host/Origin headers, allows only GET/HEAD, uses
+`Cache-Control: no-store` and refreshes only while the browser tab is visible. It
+reports the observer's local status; it does not expose file contents or initiate NAS
+traffic. The full indexed file/conflict/action UI remains future work.
+
 Embed templates and all necessary CSS/JS with `go:embed`; use simple Go templates and
 minimal JavaScript (vendored htmx if useful). **No runtime CDN, web fonts, analytics or
 update checks.** Tailwind, if used, is compiled at build time. Render paginated/indexed
@@ -459,14 +471,15 @@ implemented field; distinguish defaults from effective limits.
   failure recovery on the real QNAP. Record the native/helper decision and supported
   deployment matrix (§3). Temp-dir tests cover logic, not SMB/NFS/SFTP semantics. Do
   not claim hard guarantees without E2E.
-- [ ] **M3 — Correct bidirectional core:** immutable versions, diff planning/materialization,
+- [ ] **M3 — Correct bidirectional core:** immutable versions, persistent acknowledged
+  bases, diff materialization,
   recoverable transactions, journal/checkpoints, acknowledgements, conflict pause and
   tombstones from the first write-capable engine. Verify two-client divergence, clock
   skew, each crash boundary, disk full and route loss. Then pass byte-saving budgets.
 - [ ] **M4 — Low-cost discovery and lifecycle:** adaptive polling, paced external scans,
   reconnect comparison, retention/GC and old-cursor recovery. Verify existing-file edits
   with unchanged parent directory timestamps and no repeated whole-tree rehash.
-- [ ] **M5 — WAN actions and UI:** cached views, bounded explicit SFTP/helper actions,
+- [ ] **M5 — WAN actions and full UI:** cached views, bounded explicit SFTP/helper actions,
   resumable diff downloads/uploads and conflict choices. Embed all assets. Pass packet
   captures for idle WAN and selection-only operations, including unsupported-copy cases.
 - [ ] **M6 — Release hardening:** benchmark documented workloads on the actual NAS; run
