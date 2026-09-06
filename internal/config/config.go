@@ -1,17 +1,21 @@
 // Package config loads and validates the nas-sync configuration.
 //
-// Configuration is a single JSON file. All fields have defaults (see defaults()
+// Configuration is a single JSON file. All fields have defaults (see Default()
 // in config.go); only the values the user wants to override need to be present.
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"nas-sync/internal/exclude"
 )
 
 // Duration is a time.Duration that JSON-marshals as a string such as "1.5s"
@@ -58,9 +62,11 @@ func (d Duration) MarshalJSON() ([]byte, error) {
 
 // NAS describes the QNAP share this client synchronizes with.
 type NAS struct {
-	// Host is the LAN IP or hostname of the NAS. Only private-address
-	// resolutions are accepted by the LAN guard (internal/languard).
-	Host string `json:"host"`
+	// Host is the configured NAS address. Automatic access requires an IP literal
+	// and a verified direct route; a hostname never triggers background DNS.
+	Host      string `json:"host"`
+	Interface string `json:"interface"`
+	Prefix    string `json:"prefix"`
 	// Share is the SMB/NFS share name (informational).
 	Share string `json:"share"`
 	// MountPoint is where the share is already mounted by the system
@@ -83,8 +89,10 @@ type Coalesce struct {
 	Idle Duration `json:"idle"`
 	// MaxWait caps how long a continuously-active batch may grow.
 	MaxWait Duration `json:"maxWait"`
-	// Tick is how often the coalescer evaluates Idle/MaxWait.
-	Tick Duration `json:"tick"`
+	// Tick is deprecated and ignored; a deadline timer now drives coalescing.
+	Tick       Duration `json:"tick"`
+	MaxPending int      `json:"maxPending"`
+	MaxBytes   int      `json:"maxBytes"`
 }
 
 // SelectiveSync holds gitignore-style exclusion globs.
@@ -106,10 +114,21 @@ type Remote struct {
 	KnownHosts string `json:"knownHosts"`
 }
 
+// Limits bound background work. Hash/transfer settings are reserved for the
+// later transfer engine; local observation uses ScanOpsPerSecond and MaxWatches.
+type Limits struct {
+	ReadBytesPerSecond int64 `json:"readBytesPerSecond"`
+	ScanOpsPerSecond   int   `json:"scanOpsPerSecond"`
+	MaxWatches         int   `json:"maxWatches"`
+	CacheBytes         int64 `json:"cacheBytes"`
+}
+
 // Config is the effective, fully-defaulted configuration.
 type Config struct {
 	// LANGuard enforces that automatic sync only ever touches a LAN mount.
-	LANGuard bool `json:"lanGuard"`
+	LANGuard bool   `json:"lanGuard"`
+	StateDir string `json:"stateDir"`
+	Limits   Limits `json:"limits"`
 	// ScanRemote is how often out-of-band remote changes are probed in LAN mode.
 	ScanRemote Duration      `json:"scanRemote"`
 	BlockSize  int           `json:"blockSize"`
@@ -136,9 +155,10 @@ func DefaultPath() string {
 func Default() *Config {
 	return &Config{
 		LANGuard:   true,
-		ScanRemote: Duration(60 * time.Second),
+		ScanRemote: Duration(15 * time.Minute),
 		BlockSize:  64 * 1024, // 64 KiB content blocks (BLAKE3 digests)
 		WebPort:    8721,
+		Limits:     Limits{ReadBytesPerSecond: 20 << 20, ScanOpsPerSecond: 50, MaxWatches: 100000, CacheBytes: 1 << 30},
 		NAS: NAS{
 			Protocol: "smb",
 		},
@@ -147,9 +167,10 @@ func Default() *Config {
 			Port:    22,
 		},
 		Coalesce: Coalesce{
-			Idle:    Duration(1500 * time.Millisecond),
-			MaxWait: Duration(5 * time.Second),
-			Tick:    Duration(50 * time.Millisecond),
+			Idle:       Duration(1500 * time.Millisecond),
+			MaxWait:    Duration(5 * time.Second),
+			MaxPending: 10000,
+			MaxBytes:   4 << 20,
 		},
 	}
 }
@@ -158,15 +179,29 @@ func Default() *Config {
 // A missing file is not an error: it yields the defaults.
 func Load(path string) (*Config, error) {
 	cfg := Default()
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return cfg, nil
 		}
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	if err := json.Unmarshal(data, cfg); err != nil {
+	defer f.Close()
+	const maxConfigBytes = 1 << 20
+	data, err := io.ReadAll(io.LimitReader(f, maxConfigBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	if len(data) > maxConfigBytes {
+		return nil, fmt.Errorf("config exceeds 1 MiB")
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(cfg); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if err := dec.Decode(new(any)); err != io.EOF {
+		return nil, fmt.Errorf("config must contain exactly one JSON object")
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("config %s: %w", path, err)
@@ -183,6 +218,56 @@ func (c *Config) Validate() error {
 	}
 	if c.NAS.MountPoint == "" {
 		return fmt.Errorf("nas.mountPoint is required")
+	}
+
+	if _, err := exclude.Compile(append(append([]string{}, c.Selective.ExcludeLocal...), c.Selective.ExcludeRemote...)); err != nil {
+		return fmt.Errorf("selectiveSync: %w", err)
+	}
+	if !c.LANGuard {
+		return fmt.Errorf("lanGuard cannot be disabled: automatic synchronization must remain LAN-only")
+	}
+	if !filepath.IsAbs(c.Local.Root) || !filepath.IsAbs(c.NAS.MountPoint) {
+		return fmt.Errorf("local.root and nas.mountPoint must be absolute")
+	}
+	if Overlap(c.Local.Root, c.NAS.MountPoint) {
+		return fmt.Errorf("local.root and nas.mountPoint must not overlap")
+	}
+	if c.StateDir != "" && (!filepath.IsAbs(c.StateDir) || Overlap(c.StateDir, c.Local.Root) || Overlap(c.StateDir, c.NAS.MountPoint)) {
+		return fmt.Errorf("stateDir must be absolute and outside both roots")
+	}
+	if c.ScanRemote.Std() <= 0 || c.ScanRemote.Std() > 7*24*time.Hour {
+		return fmt.Errorf("scanRemote must be in (0, 168h]")
+	}
+	if c.Coalesce.MaxPending < 1 || c.Coalesce.MaxPending > 100000 {
+		return fmt.Errorf("coalesce.maxPending must be in [1, 100000]")
+	}
+	if c.Coalesce.MaxBytes < 4096 || c.Coalesce.MaxBytes > 64<<20 {
+		return fmt.Errorf("coalesce.maxBytes must be in [4096, 67108864]")
+	}
+	if c.Coalesce.MaxWait.Std() > time.Hour {
+		return fmt.Errorf("coalesce.maxWait must be <= 1h")
+	}
+	if c.Limits.ReadBytesPerSecond < 1024 || c.Limits.ReadBytesPerSecond > 1<<30 {
+		return fmt.Errorf("limits.readBytesPerSecond must be in [1024, 1073741824]")
+	}
+	if c.Limits.ScanOpsPerSecond < 1 || c.Limits.ScanOpsPerSecond > 10000 {
+		return fmt.Errorf("limits.scanOpsPerSecond must be in [1, 10000]")
+	}
+	if c.Limits.MaxWatches < 1 || c.Limits.MaxWatches > 1000000 {
+		return fmt.Errorf("limits.maxWatches must be in [1, 1000000]")
+	}
+	if c.Limits.CacheBytes < 1<<20 || c.Limits.CacheBytes > 1<<40 {
+		return fmt.Errorf("limits.cacheBytes must be in [1048576, 1099511627776]")
+	}
+	if c.NAS.Prefix != "" {
+		prefix, err := netip.ParsePrefix(c.NAS.Prefix)
+		if err != nil {
+			return fmt.Errorf("nas.prefix must be a CIDR prefix")
+		}
+		addr, err := netip.ParseAddr(c.NAS.Host)
+		if err != nil || !prefix.Contains(addr) {
+			return fmt.Errorf("nas.host must be an IP address within nas.prefix")
+		}
 	}
 	if c.Remote.Enabled {
 		if c.Remote.Host == "" || c.Remote.User == "" {
@@ -201,11 +286,11 @@ func (c *Config) Validate() error {
 	if c.Coalesce.MaxWait.Std() < c.Coalesce.Idle.Std() {
 		return fmt.Errorf("coalesce.maxWait must be >= coalesce.idle")
 	}
-	if c.Coalesce.Tick.Std() <= 0 || c.Coalesce.Tick.Std() > c.Coalesce.Idle.Std() {
-		return fmt.Errorf("coalesce.tick must be in (0, coalesce.idle]")
+	if c.Coalesce.Tick.Std() < 0 || c.Coalesce.Tick.Std() > c.Coalesce.Idle.Std() {
+		return fmt.Errorf("coalesce.tick must be in [0, coalesce.idle]")
 	}
-	if c.BlockSize < 1<<10 || c.BlockSize&(c.BlockSize-1) != 0 {
-		return fmt.Errorf("blockSize must be a power of two >= 1024")
+	if c.BlockSize < 1<<10 || c.BlockSize > 4<<20 || c.BlockSize&(c.BlockSize-1) != 0 {
+		return fmt.Errorf("blockSize must be a power of two in [1024, 4194304]")
 	}
 	if c.WebPort < 0 || c.WebPort > 65535 {
 		return fmt.Errorf("webPort out of range")
@@ -223,4 +308,13 @@ func Print(w io.Writer, c *Config) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(c)
+}
+
+// Overlap performs a lexical check; runtime code must also check resolved paths.
+func Overlap(a, b string) bool {
+	within := func(root, p string) bool {
+		rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(p))
+		return err == nil && (rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))))
+	}
+	return within(a, b) || within(b, a)
 }

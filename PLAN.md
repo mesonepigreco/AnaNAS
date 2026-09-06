@@ -1,371 +1,500 @@
 # PLAN — `nas-sync`
 
-A Dropbox-like, **diff-based** folder synchronizer between a Linux PC and a QNAP NAS,
-optimized for the **LAN** and written in **Go**, with a local web UI.
+A lightweight Linux folder synchronizer between a PC and a NAS, written in Go,
+with a local web UI. **[PROJECT.md](PROJECT.md) is the requirements source of truth.**
+This document translates its eight requirements into implementation steps; design
+proposals below do not add new hard requirements.
 
-**Terminology (clarified):** "internet" in `PROJECT.md` means *outside the LAN* (WAN/remote).
-The design maximizes automatic sync on the LAN, and separately allows **on-demand access**
-(and explicit, user-requested sync) to files from outside the LAN.
+Reviewed against the source and existing code on 2026-09-06. The priority is
+correct synchronization with **minimal CPU, disk work, and network traffic**.
+Performance numbers below are proposed acceptance budgets, not measured results.
 
----
+## 1. Requirements and design boundaries
 
-## 1. Locked decisions & context
-
-| Question | Decision |
+| PROJECT.md | Planned behavior |
 |---|---|
-| Sync client OS | **Linux only** (watch APIs: inotify via `fsnotify`) |
-| Language | **Go** (single static binaries, small idle CPU/RAM) |
-| NAS software | **None.** Pure **SMB3 (preferred) / NFS** share. Zero install on the QNAP |
-| NAS data layout | **Real browsable files** (latest committed version) + hidden **`.nas-sync/`** metadata |
-| LAN coordination | The NAS share *is* the coordination point: per-PC state + a change **journal** as files under `.nas-sync/`, written cooperatively by clients |
-| Remote (off-LAN) access | An **SSH/SFTP adapter** to the NAS (QNAP SSH, reached via VPN, port-forward, or myQNAPcloud DDNS). Used for **on-demand read** and **explicit upload only** — never for automatic sync |
+| 1. Complete sync only on the same LAN, without internet transit | Automatic push, pull, discovery and maintenance require a verified direct LAN route to the configured NAS. A VPN/private IP alone does not qualify. Loss of that route suspends automatic NAS access. |
+| 2. Automatic sync by diff, minimizing transferred data for rewritten files | Coalesce writes, compare content against the acknowledged base, reuse verified blocks and transfer only missing content plus bounded metadata. Measure actual wire traffic in both directions, including materialization on the NAS. |
+| 3. Continuously updated file list with minimal traffic | Update the local view from local events and incremental NAS changes. Adaptive LAN discovery trades a documented maximum delay for fewer requests. Outside the LAN show a cached view with its freshness and refresh only on request by default. |
+| 4. Individual on-demand sync while online, using diffs | Explicit browse/open/download/upload of selected files is available off-LAN. Reuse cached manifests and blocks, resume interrupted downloads, and keep user actions scoped to the selection. Conflicts require a choice. |
+| 5. Exclude local and remote folders from tracking and sync | Apply exclusions before watching, listing, hashing or transferring. Exclusion is not deletion; changing a rule cannot silently remove data or cause the opposite direction to overwrite an excluded path. |
+| 6. Very low resource use, including many small writes | No idle hash work, bounded queues and caches, one background hash worker initially, paced I/O, event coalescing, and measurable CPU/memory/network budgets. |
+| 7. Group edits; track PCs and their synchronization progress; tolerate clock differences | Bounded batches of changes and a NAS-side journal/checkpoint with persistent per-PC acknowledgements. Logical versions and base comparisons determine causality; wall time is for display. |
+| 8. Warn on conflict; choose local/server or retain different versions and stop local sync | Preserve both candidates, present explicit resolution, and persist a per-PC pause for that path when the user keeps differing local and NAS versions. |
 
-Because there is no always-on server process on the NAS, every "server" responsibility is
-fulfilled by **cooperative file-based coordination** on the share: per-PC "latest synced
-version" pointers, a monotonic change journal, and optimistic concurrency with conflict
-detection at commit time.
+Interpretation retained from the previous plan: automatic synchronization is LAN-only;
+WAN operations are on demand. Requirement 3 does not promise an always-fresh WAN list
+without requests: that would require recurring internet traffic. Display that limitation.
+Initial copies and completely changed content necessarily transfer all missing bytes.
 
-Environment facts:
+Go, Linux/inotify, a QNAP target, SMB-first transport and a local web UI are current
+project choices. **Zero NAS installation is a preference from the previous plan, not a
+requirement in PROJECT.md.** Test whether existing NAS services satisfy the requirements;
+if they do not, evaluate a small on-demand NAS helper before accepting excess transfer.
+Do not silently replace diff synchronization with full-file transfers.
 
-- Client: Ubuntu (kernel 7.0), LAN `192.168.1.0/24`, host `192.168.1.17`.
-- QNAP: QTS/QuTS hero; SMB3 + NFS; SSH (SFTP) supported; share paths under `/share/<folder>`.
-  No Container Station / QPKG required.
+The previous plan's IPs, kernel version, QNAP firmware and service availability are
+examples/unverified deployment assumptions. Discover actual capabilities during setup.
 
----
+## 2. Current repository and known gaps
 
-## 2. Requirement → design mapping
+Implemented and exercised locally:
 
-| # | Requirement | Design |
-|---|---|---|
-| 1 | **Full sync only on the LAN**; never automatically off-LAN | The engine has two modes (§5.2). **LAN mode** (share mount present + NAS on a private address) runs automatic, diff-based full sync in both directions. **Remote mode** (off-LAN) disables every background transfer: no auto upload, no background download. The moment the LAN mount reappears, the engine resumes and **automatically reconciles everything** (catching up remote-side changes made meanwhile and flushing local changes made while away). |
-| 2 | Automatic sync at diff level → rewritten files send minimal data | **Block-level diff** (§5.4). A changed file is re-materialized on the NAS by reusing unchanged blocks; content-addressed chunk store dedups identical blocks across files/versions. Append/tail fast path avoids whole-file rewrite for constantly-grown files. The same diff machinery is reused for on-demand remote access so WAN transfers stay minimal too. |
-| 3 | File list updated constantly, minimal traffic | On the LAN, a cooperative **change journal** (`.nas-sync/journal/`) appends one tiny entry per committed change; clients read only new entries, never scanning the tree. Remotely, the file list is fetched **on demand** only. |
-| 4 | Access / on-demand sync of individual files when not on the LAN | **Remote mode** (§5.5): browse the NAS tree and *open/download* individual files (or a specific version from `.nas-sync`) by **block-diff** — only missing blocks cross the WAN. **Uploading a file off-LAN happens only when the user explicitly requests it** (UI "upload this file" / "push selection"); it is never automatic. Conflicts still force full-file handling. |
-| 5 | Selective sync (exclude folders local & remote) | Two exclusion sets: **local** (never watch/upload) and **remote** (never track/download). Applied in the watcher/plan builder and in the pull path. Remote exclusions stay on the NAS untouched (opt-in "prune remote" deletes them). |
-| 6 | Lightweight, no CPU burn under many small writes | Event **debounce + coalescing** groups bursts into one commit (§5.3). Hash cache keyed by `(dev, inode, size, mtime_ns)`. In LAN mode, idle state polls only one stat/s (newest journal file); in remote mode the engine is dormant except for explicit requests. Retry with backoff + jitter. |
-| 7 | Merge edits into chunks; track syncing PCs & their latest sync; clock skew | One coalesced burst → one **commit** → one journal entry. Per-PC state files `.nas-sync/pcs/<pcID>.json` record last-applied journal seq + last-observed HLC. Ordering uses a **monotonic sequence + hybrid logical clock (HLC)**; wall clocks are for display/lease expiry only (§5.6). |
-| 8 | Conflicts: warn; dialog local vs server; "keep two versions" stops syncing that file locally | Version graph per path. Push with a stale base ⇒ **CAS failure ⇒ conflict**, nothing clobbered. Divergent versions recorded under `.nas-sync/conflicts/`; web UI dialog: **keep local / keep remote / keep both** (latter stores a `name (conflicted copy)` and **pauses that path locally** until re-enabled). |
+- CLI/configuration with strict JSON, bounded sizes/work settings, disjoint root/state
+  checks and a mandatory LAN guard. `-scan-once` builds a metadata snapshot and prints
+  status; normal mode runs the recursive local observer.
+- Cancellable streaming BLAKE3 hashing with a bounded reusable buffer, invalid-size /
+  stalled-reader checks, and direct digest collection without an intermediate block list.
+- Deadline-driven coalescing with bounded path counts/bytes, continued ingestion under
+  slow consumers and explicit root-reconciliation requests on overflow.
+- A persistent bbolt metadata index with logical scan IDs and dirty generations;
+  recursive fsnotify observation, exclusions before traversal, paced paginated scans,
+  restart recovery, directory-move handling and conservative incomplete-scan behavior.
+- A read-only `-check-lan` diagnostic for SMB mount/source identity and physical-interface /
+  direct-route evidence. It performs no NAS probe and never enables automatic writes.
+- A `-discover-nas` command that reports kernel network mounts and user-session GVFS SMB
+  paths without contacting them. The current environment exposes the dedicated
+  `//192.168.1.30/nas-sync-test` share through kernel CIFS, while `satanasso.local`
+  `home` and `public` remain GVFS/FUSE inspection paths.
+- Reproducible local CPU/memory and network-syscall checks, hashing benchmarks, and an
+  optional systemd user unit with CPU/I/O priority and an enforced CPU quota.
 
----
+`go test ./...`, `go test -race ./...`, `go build ./...` and `go vet ./...` pass on
+Go 1.27.1. See [README.md](README.md), [local measurements](docs/performance.md) and
+[real-NAS validation status](docs/e2e-qnap.md). These results validate local observation,
+not the proposed synchronization protocol or the full ten-minute acceptance workloads.
 
-## 3. High-level architecture
+Remaining: content index/acknowledged sync bases, transfer scheduling and pacing,
+transport capability probes, write-capable LAN enforcement, diff materialization,
+journal/checkpoints, conflicts and paused-path resolution, retention, WAN actions and
+web UI. No NAS content is accessed or modified by the current observer. Configuration
+settings for hashing throughput, cache size, remote scans and web/SSH endpoints are
+reserved and validated where applicable; they do not enable those future features.
 
+Live mount discovery now finds the dedicated kernel CIFS mount
+`//192.168.1.30/nas-sync-test` at `/mnt/nas-sync-test`, using SMB 3.1.1,
+`cache=strict`, `serverino` and `actimeo=1`. The host is `192.168.1.17/24` on
+`eno1`, with a direct `192.168.1.0/24` route. The two GVFS SMB mounts at
+`/run/user/1000/gvfs/smb-share:server=satanasso.local,share=home` and
+`...share=public` remain inspection/test-only because GVFS is a user-space FUSE
+adapter and does not prove automatic-sync locking, fsync, watch, server-side copy or
+route behavior. The real-NAS probe and setup are documented in `docs/e2e-qnap.md` and
+`scripts/test_real_nas.py`; its write mode is explicit and directory-scoped.
+The read-only probe passed for both the prior GVFS path and the dedicated CIFS path.
+The disposable CIFS write probe passed for readback, same-filesystem rename,
+exclusive create, `fsync` and `copy_file_range`, and removed its temporary objects.
+
+Host preparation is complete for client-side testing: `mount.cifs` and `smbclient`
+are installed, the dedicated QNAP share and account are mounted, and
+`config.real-nas.example.json` records the verified IP, interface, prefix and mount
+point. M2 remains open for wire-byte capture, server-side copy/offload, durability,
+cross-client fencing, crash recovery and OS egress enforcement; the successful client
+probe does not establish those properties.
+
+The first implementation deliberately retains safe create/missing observations for
+renames; verified content reuse and download-feedback suppression belong to the
+write-capable engine. An observation failure currently stops the daemon with recovery
+state intact; resilient path-specific retries and degraded availability reporting remain.
+
+## 3. Architecture and capability gate
+
+```text
+local directory → recursive watcher → bounded dirty index → scheduler
+                                                          ↓
+local UI ← persistent local index ← reconciliation / conflict engine
+                                                          ↓
+                  LAN policy gate → transport capabilities → NAS
+explicit scoped UI request → WAN policy gate → lazy SSH/SFTP → NAS
+
+NAS: browsable files + hidden immutable versions/content + journal + PC cursors
 ```
-┌─────────────────────────────────── Linux PC ─────────────────────────────────┐
-│                                                                                │
-│  ┌──────────┐  fsnotify  ┌───────────┐  dirty paths  ┌──────────────┐         │
-│  │ Local dir │──────────▶│ Watcher    │──────────────▶│ Coalescer    │──┐      │
-│  │  (root)   │           │ (inotify)  │               │ (chunk/batch)│  │plan  │
-│  └─────┬────┘           └───────────┘               └──────────────┘  ▼      │
-│        │ materialize / read                                ┌──────────────┐  │
-│  ┌─────┴───────┐   ┌────────────┐    ┌────────────────────▶│ Sync engine  │  │
-│  │ Block cache │   │Local index │    │ LAN auto-sync (diff)│ (modes §5.2) │  │
-│  │  (bbolt)    │   │ (bbolt)    │    └─────────────────────│  + conflict  │  │
-│  └─────────────┘   └────────────┘                         └──────┬───────┘  │
-│        ▲                                                        │  ▲        │
-│        │ on-demand fetch/diff (req 4)             ┌─────────────┘  │        │
-│        │                                          │                │explicit│
-│  ┌──────────────────┐                 ┌───────────┴────┐            │upload  │
-│  │ Remote client    │  SSH/SFTP       │ LAN transport  │   (auto only) │only   │
-│  │ (on-demand r/w)  │◀─ WAN (off-LAN) │ SMB3 mount     │◀──────────────┘       │
-│  └────────┬─────────┘                 └───────┬────────┘                     │
-│           │   network boundary               │ only when NAS reachable on LAN │
-└───────────┼───────────────────────────────────┼────────────────────────────────┘
-            ▼                                   ▼
-┌────────────────────────── QNAP NAS  (browsable SMB/NFS share + SSH/SFTP) ─────┐
-│  root/                    browsable, latest committed content (real files)     │
-│  .nas-sync/                                                                     │
-│    chunks/                content-addressed blocks (dedup)                     │
-│    versions/<relpath>.v   per-file ordered block list + metadata + version     │
-│    journal/<seq>.json     tiny append-only change records (path/ver/pc/hlc)    │
-│    pcs/<pcID>.json        per-PC: last applied seq, last observed HLC          │
-│    conflicts/<file>.json  divergent versions awaiting user resolution          │
-│    locks/                 O_EXCL advisory locks for multi-PC transactions      │
-│    tree.json              root directory digest (hint for cheap scans)         │
-└──────────────────────────────────────────────────────────────────────────────────┘
-```
 
-Key abstraction: **`nasfs`** — a filesystem interface with two adapters:
-- `mount` adapter (LAN): operates on the SMB/NFS mount path. Backs **automatic sync**.
-- `sftp` adapter (WAN): SSH/SFTP to the NAS, opened lazily for **on-demand** operations.
+Keep one daemon, a small embedded UI and one embedded metadata database (bbolt is a
+candidate, not yet a dependency). Store cached content as bounded files outside the
+sync root; do not put large blobs in a metadata database. No per-file goroutines.
+Separate transport capability checks from policy and from pure diff planning.
 
-The engine treats both as the same logical store; mode rules decide which may be used and
-for what. In tests both adapters can point at plain temp directories, keeping tests hermetic.
+### Gate before automatic writes
 
----
+A mounted share does **not** imply server-side reconstruction. Reading old NAS blocks
+into the PC and writing them to a NAS temp file sends unchanged bytes over the network.
+Neither content addressing nor an atomic rename removes that traffic.
+
+Prototype on the actual NAS and client stack:
+
+1. Check same-volume atomic replacement, durable writes, exclusive coordination,
+   cache visibility and recovery after client disconnect.
+2. Check SMB server-side range copy/clone or an equivalent operation for creating a
+   staged file from existing NAS content. `copy_file_range` support is filesystem/server
+   dependent; success is insufficient proof of offload. Verify with wire counters.
+3. For SFTP, discover supported extensions. Server-side `copy-data` and durability/
+   rename extensions are optional; ordinary SFTP reads/writes do not imply them.
+4. Check that coordination and visibility work **across SMB and SFTP clients**, not
+   merely twice through one protocol. Test NFS separately before advertising it.
+5. If native operations cannot meet these needs, compare an explicitly configured,
+   bounded on-demand SSH helper with a small NAS service. The helper can reconstruct
+   from NAS-local blocks and serialize publication without a PC round trip. It needs
+   the same resource limits; no busy loop or perpetual hashing on the NAS.
+
+Record the supported mode and measured bytes in `docs/e2e-qnap.md`. Enable automatic
+writes only for a mode with verified diff materialization and commit guarantees.
+Unsupported setups remain paused/read-only with an explanation. A costly full-file
+WAN fallback needs explicit approval for that operation after showing its estimate.
+Native-only multiwriter limitations must not be hidden behind an unproven lock scheme.
 
 ## 4. Data model
 
-- **Block**: fixed 64 KiB slice of a file (last block shorter), digest = BLAKE3.
-- **Version**: immutable snapshot of one path = `{seq, hlc, pcID, base, size, mtime_ns,
-  blocks:[digest…], tombstone?}`.
-- **Manifest** (`.nas-sync/versions/<relpath>.v`): current version of a path + link to the
-  previous (`base`), keeping history cheap.
-- **Journal entry**: `{seq, kind: put/delete, path, digest, pcID, hlc, tz}` — the unit a
-  client needs to refresh its view.
-- **Chunk store**: content-addressed immutable files; identical content ⇒ identical path ⇒
-  never uploaded twice (across files, versions, and PCs — including via SFTP).
-- **Per-PC state** `pcs/<pcID>.json`: `lastAppliedSeq`, `lastObservedHLC`. This is the
-  spec's "server keeps the latest sync for that PC", done cooperatively.
+- **Content block:** digest, length and bytes. Start with fixed 64 KiB BLAKE3 blocks for
+  the prototype; persist algorithm, block size and format version in manifests. Tune
+  only after benchmarks. Existing versions remain readable after a setting changes.
+- **Immutable version:** unique ID, path ID, parent/base version ID, author PC, file size,
+  display timestamps, ordered block references and tombstone flag. Use compact binary
+  digests internally and paged manifests for large files. At 64 KiB, a 1 GiB file has
+  16,384 digests (512 KiB of raw hashes before metadata); do not refetch them unchanged.
+- **Current head:** path → immutable version ID, published through the transaction
+  protocol. Keep version objects separately so history is not an overwritten `.v` file.
+- **Journal batch:** immutable transaction ID, assigned sequence and bounded list of
+  path changes, including put/delete/rename. One coalesced batch can contain many files;
+  publication/recovery is explicit per file, not a promise of atomic whole-tree sync.
+- **Journal head/checkpoint:** small discoverable pointer to committed batches plus a
+  compact snapshot. No repeated listing of an ever-growing directory to find “newest”.
+- **PC state:** stable random PC ID, last durably processed sequence, and outstanding
+  conflicts/deferred work. A processed event is not necessarily an applied file; expose
+  that distinction. Batch acknowledgements after durable local progress, not per event.
+- **Local index:** fingerprints, acknowledged bases, dirty generations, cached NAS view,
+  pending operations, pauses and bounded content-cache metadata.
 
-### Rename handling
-`(device, inode, size, mtime_ns)` fingerprints pair delete+create into
-`kind: rename` journal entries so moved files are not re-uploaded.
+Use opaque IDs/sharded paths for metadata, not unescaped user paths. Validate all paths
+against traversal and symlink escapes. Metadata/temp/cache directories are always
+excluded. Detect case collisions; do not silently lowercase names. Initially support
+regular files/directories; report symlinks, special files and unsupported metadata.
 
----
+Content addressing reduces repeat payload, but one file/request per small block can
+cost more than it saves. Batch availability checks, range reads and manifest updates;
+consider immutable pack files with bounded indexes if measurements justify them.
+Defer cross-file dedup beyond basic reuse if its lookup/GC costs exceed the savings.
 
 ## 5. Core algorithms
 
-### 5.1 Lifecycle & connection states
+### 5.1 Lifecycle and reconciliation
 
-```
-                 ┌──────────────── LAN mount present + NAS on private addr ─┐
-   OFFLINE ◀─────┤                                                          ▼
-     │           │                                              ┌──────────────────┐
-     ▼           │                                              │  LAN MODE        │
-  REMOTE MODE    └── re-connect ───────────────────────────────▶│  auto full sync  │
-  (on-demand only)                                             │  (both directions)│
-     ▲                                                          └────────▲─────────┘
-     └────────────────────── mount lost / WAN only ──────────────────────┘
-```
+- OFFLINE and REMOTE: keep lightweight local observation/dirty tracking; do not hash
+  an accumulating backlog until a permitted operation needs it. No periodic NAS probe,
+  WAN listing, DNS refresh, SSH keepalive or background transfer. Network/mount events
+  from the OS can trigger local reevaluation of LAN eligibility.
+- LAN: verify the gate before NAS I/O, replay journal entries since the durable cursor,
+  compare local dirty state and remote versions against their common acknowledged base,
+  then schedule nonconflicting work. **Never blindly flush local edits before examining
+  remote changes on reconnect.**
+- Bootstrap, watcher gaps and expired journal cursors require reconciliation. Normal
+  reconnect uses the index/journal and dirty set, not a complete rehash. A daemon restart
+  with an observation gap requires a paced metadata walk of affected roots.
+- Missing/unmounted/inaccessible roots are unavailable, not empty. Never infer mass
+  deletion from disconnects, permissions errors, incomplete scans or excluded folders.
 
-- **OFFLINE / REMOTE MODE**: no LAN mount. The daemon is nearly dormant. It may serve the
-  web UI and perform **explicit user actions** through the SFTP adapter (browse, download,
-  open a file/version). **No background transfer of any kind.**
-- **LAN MODE**: the mount is up. The engine wakes, and on **first reconnect** runs a full
-  reconciliation (both directions): flush local changes accumulated while away, pull remote
-  changes made meanwhile, resolve nothing silently (conflicts surface in the UI). Then
-  steady-state inotify pushes + journal pulls continue automatically.
+### 5.2 LAN and WAN policy
 
-### 5.2 Mode rules & the "no upload off-LAN" guard
+Require the expected mount identity/source/share, configured NAS identity/address and
+an allowed directly connected LAN interface/prefix, with route selection consistent
+with that interface. Read local mount/route state before touching an automount path.
+Reject public routes, VPN/tunnel paths and ambiguous identity by default; private or
+link-local addressing is insufficient. Account for IPv6 and any SMB multichannel
+paths, or disable unsupported routing configurations.
 
-1. Automatic sync engine **only runs in LAN mode** — determined by: mount present in
-   `/proc/mounts` AND mount source resolves to a private/link-local address.
-2. In remote mode the **SFTP adapter is read-only by default**. Write capability is armed
-   per-operation only when the user explicitly requests an upload from the UI.
-3. Explicit remote uploads are still routed through the same diff/commit machinery, but as a
-   single on-demand action (never queued by the watcher).
-This makes "accidental" WAN uploads impossible while keeping remote read access natural.
+Recheck on route/address/mount changes and before opening transfer work. Bind supported
+connections to the permitted interface. A strict no-WAN guarantee during route changes
+also needs OS routing/firewall enforcement for mounted-share connections; an application
+check alone has a race. Document/test that deployment prerequisite before claiming the
+guarantee. Stop scheduling, close/cancel supported connections and keep recovery state
+on loss of eligibility; do not leave unbounded goroutines blocked in mount I/O.
 
-### 5.3 Coalescing edits into chunks (req 7)
+The WAN adapter is opened lazily with pinned host verification. Each explicit action
+carries a selection, direction, byte budget and cancellation scope. It cannot inherit
+or drain the background queue. Retry only within the action's lifetime and budget;
+close idle sessions. Resuming the daemon does not resume a WAN upload automatically.
 
-- fsnotify events land in a per-path dirty set; a **debounce timer** (default ~1.5 s quiet,
-  hard cap ~5 s of churn) drains it into one **commit unit** — a constantly-writing process
-  yields one block-diff, not thousands. Knobs `coalesce.idle`, `coalesce.maxWait`.
+### 5.3 Coalescing and bounded scheduling
 
-### 5.4 Diff engine (req 2) — shared by LAN auto-sync and WAN on-demand sync
+- Watch local directories recursively, registering new subdirectories and applying
+  exclusions before traversal. Do not rely on mounted-share fsnotify for remote edits.
+- Track a dirty generation per path. A single resettable timer waits for the next
+  deadline; no active ticker when there is nothing to do. Start with 1.5 s quiet time
+  and 5 s eligibility cap. **Eligibility is not a requirement to rehash a hot file every
+  five seconds**, nor a guarantee of completion under continuous writes.
+- Bound in-memory pending paths (initial target 10,000) and batch entries/bytes. Persist
+  overflow or collapse it into subtree-rescan markers; keep draining watcher events.
+  Kernel overflow sets a durable rescan-needed marker rather than losing correctness.
+- Separate watcher ingestion, scheduling and transfer. One active job per path, deduped
+  latest work, fair scheduling across paths. Preserve edits arriving during hashing.
+- Back off repeatedly unstable or large hot files (initial retry range 5–60 s), with
+  visible status. Do not grow queues or let one hot file starve quiet files. New limits
+  bound queued work regardless of the coalescing interval.
+- Persist dirty state in bounded batches. After an unclean shutdown, compensate for
+  any unflushed event window with a metadata walk; no fsync for every write notification.
 
-1. **Fingerprint check** — skip files whose `(ino,size,mtime_ns)` are unchanged.
-2. **Block the file** (64 KiB) → ordered digest list; only re-hash changed blocks (cache).
-3. **Compare against the remote base** = ordered digest list of the *current* remote version
-   (from its `.v` manifest, or the remote's block list for on-demand). No whole-file pull.
-4. **Classify**:
-   - *Append/tail-only* (same prefix, grew): **tail patch** — write only new trailing bytes.
-   - *Suffix/few-block edit*: pwrite only changed ranges when block layout is preserved
-     (rolling checksum locates matches).
-   - *Structural edit*: temp file + atomic rename; unchanged blocks copied block-wise from
-     the existing copy, **only missing blocks uploaded** from the chunk store ⇒ wire bytes ≈
-     changed blocks, not the whole file.
-5. Update `.v`, append journal entry, bump HLC.
+### 5.4 Hashing, diff and materialization
 
-Content-addressing keeps even layout-shifting rewrites cheap.
+1. **Inspect cheaply.** Cache `(device, inode, size, mtime_ns, ctime_ns)` and a dirty
+   generation. A fingerprint is a skip hint, not proof of content identity. A write
+   event invalidates it even if size/mtime match. Metadata-only changes reuse content
+   once verified; same-content rewrites produce no content transfer or new content version.
+2. **Hash a stable candidate.** inotify does not report changed byte ranges. An arbitrary
+   modified file generally needs one sequential read after coalescing, even if few
+   blocks eventually transfer. Reuse a buffer and stream digests into bounded storage;
+   check cancellation and pace between reads. Compare metadata/generation before and
+   after hashing and recheck before publication; retry if changed. Active writers can
+   still require snapshots/application quiescence for a consistent application-level
+   image. Never advertise transaction-consistent database backups from this mechanism.
+3. **Compare with the acknowledged base and current remote version.** If both sides
+   diverged, preserve candidates for conflict resolution. If digests agree, acknowledge
+   without retransmitting. Transfer only verified missing blocks; account for manifest,
+   existence checks and protocol overhead as well as payload.
+4. **Choose an evidenced algorithm.** Fixed blocks cheaply handle aligned overwrites but
+   insertion near the start can shift every later block. Benchmark a bounded rolling
+   matcher or content-defined chunking for large shift-heavy files before promising
+   efficient arbitrary rewrites. Avoid rolling scans on small files by default. Full
+   replacement and encrypted/compressed rewrites may have no reusable content.
+5. **Append optimization is conditional.** Growth alone does not prove an unchanged
+   prefix. Without a trustworthy append-only contract, verify it before reuse. Preserve
+   old versions and stage even appends; no default in-place patch to the visible file.
+6. **Stage and verify.** Reuse NAS-local content through the verified capability (§3),
+   write missing blocks once, verify lengths/digests as they enter storage, then publish.
+   Never reread unchanged NAS payload through the PC just to build a temporary file.
+   If verified uploaded bytes could change locally, retain a bounded immutable spool
+   or rehash on transfer. The published manifest must describe the bytes actually sent.
+7. **Downloads** build a local temp file using verified local/cache ranges and only
+   missing remote blocks, then atomically replace after checking for intervening local
+   edits. Keep partial verified blocks for an explicit resume. Metadata browsing fetches
+   no content, previews or hashes of remote files.
 
-### 5.5 Remote (off-LAN) on-demand access (req 4)
+Do not hash an unindexed NAS file by downloading all of it over WAN merely to discover
+its diff. Show the available full-download estimate or use an approved NAS-side hashing
+capability; local WAN caching cannot eliminate a first read of previously unseen content.
+Default compression off; enable only if measured byte savings justify CPU cost. Avoid
+recompressing already compressed content and encrypt through the chosen transport.
 
-- UI file list and "open/download" operate on the **remote store view**: built by lazy
-  stat/readdir over SFTP plus `.v` manifests when a file has version history.
-- Downloading a file = materialize from the remote base + only missing blocks over the wire.
-- Downloading an older version = read that version's manifest block list from `.nas-sync`
-  and fetch only blocks absent locally.
-- **Explicit upload** = same commit pipeline, flagged `explicit`, executed once; never
-  triggered by the watcher while off-LAN.
-- Conflicts during a remote operation resolve through the same dialog; **keep both** is
-  available (the remote and local copies diverge, per-path sync pauses locally).
+### 5.5 Remote on-demand access
 
-### 5.6 Change discovery & journal pull (req 3)
+Serve cached, paginated directory listings with age/staleness and an explicit refresh.
+Fetch only the requested directory/page and selected version manifests. Cache immutable
+manifests and verified blocks; batch missing-range requests with bounded concurrency.
+A click to open one file must not enumerate or sync its siblings or all version history.
 
-- **LAN**: pull loop reads `pcs/<ownID>.json.lastAppliedSeq+1 … newest` and fetches missing
-  blocks. Out-of-band NAS edits (File Station, other tools) leave no journal → caught by a
-  **dir-mtime scan**: only directories whose fingerprint `(dir, dirMtime)` changed are
-  re-listed (default 60 s).
-- **Remote**: no background discovery. The remote view refreshes on user navigation
-  (bounded readdir depth).
+Estimate payload plus metadata before a costly operation; display actual transferred
+bytes including retries. Cancellation stops further requests. Conflicts do not silently
+trigger a full-file WAN download; show its cost if a resolution requires one. Downloads
+outside the sync root do not silently mark that root's version as acknowledged.
 
-### 5.7 Clock skew (req 7)
+### 5.6 Change discovery
 
-- Never compare wall clocks for freshness. Ordering is by monotonic **sequence + HLC**.
-- Wall time is display/lease-only with a skew tolerance (default 5 min).
-- `pcs/*.json` last-observed HLC lets a rejoining PC be told exactly what it missed.
+For cooperating clients, read the small journal head adaptively: initially 2 s while
+active, back off to 30 s while quiet with jitter, reset on activity. Read only new bounded
+batches; batch cursor writes. Allow a lower-traffic profile (up to 60 s idle discovery).
+SMB metadata caching can hide head updates, so test effective delay and bytes with the
+actual mount options; one application stat is not necessarily one network request.
 
-### 5.8 Conflicts & resolution (req 8)
+Out-of-band NAS edits cannot be discovered from the cooperative journal. Directory
+mtime detects entry changes, **not edits to existing file contents**. Use a resumable,
+budgeted file-metadata walk on the LAN, with directory hints only as an optimization.
+Start with a 15-minute target sweep, at most 50 metadata operations/s and bounded slices;
+large trees take longer and the UI must show actual coverage age. Hash only candidates
+under the same budgets. Elect/assign one scanner when safe coordination is available
+so multiple PCs do not all read/hash the NAS tree. External tools do not honor our locks;
+coordinate exclusive managed writes when strong overwrite guarantees are required.
 
-- A push carries `base` = the manifest seq it believes it updates. Commit succeeds only if
-  `manifest.seq == base` (CAS via atomic rename). Otherwise → conflict, nothing lost.
-- Engine stores both versions under `.nas-sync/conflicts/<relpath>`, marks the path pending,
-  stops touching it, and surfaces a UI dialog.
-- **Keep local** → push ours. **Keep remote** → drop local changes (keep a `conflicted copy`
-  for safety). **Keep both** → versions diverge (`name (conflicted copy)` locally); that
-  path is **paused on this PC** until re-enabled. Choices persist; nothing is auto-committed.
+Size/mtime checks alone can miss metadata-preserving edits. Offer an explicit integrity
+scan and optional infrequent, paced LAN verification. Document this detection tradeoff;
+constant perfect discovery without a NAS observer requires recurring scan work.
 
-### 5.9 Selective sync (req 5)
+### 5.7 Ordering and cooperative commit protocol
 
-- `excludeLocal`: applied in watcher + plan builder → never watched/uploaded, dropped from
-  the local index. `excludeRemote`: applied on pull/remote view → never downloaded/tracked.
-- gitignore-style globs + exact overrides; edits re-index only affected subtrees.
+Atomic rename replaces a name; it is **not compare-and-swap on a version** and does not
+atomically update content, manifest and journal together. HLC timestamps do not allocate
+a global sequence or serialize writers. Prefer a coordinator-issued sequence and
+immutable version IDs; defer HLC unless a concrete need remains. Never select a winner
+by wall-clock time or reclaim a lock solely because another PC's clock says it expired.
 
-### 5.10 Reliability
+Before enabling multiwriter mode, validate a common coordinator/locking mechanism for
+all transports, with safe recovery and fencing of disconnected writers. An `O_EXCL`
+lock file with a timeout is not sufficient. If native cross-protocol fencing cannot be
+proved, use the helper/service route or report the mode unsupported. No automatic stale
+lock stealing without ensuring the old writer cannot publish again.
 
-- NAS writes are **temp file + atomic rename** on the same volume.
-- Local **oplog** (`~/.config/nas-sync/<root>/oplog`) is fsynced before touching the NAS, so
-  crashes resume rather than corrupt; startup reconciliation is idempotent (CAS).
-- Retries with exponential backoff + jitter; a failing path never blocks the queue.
+Proposed recoverable transaction, under that validated serialization:
 
----
+1. Stage immutable blocks/version and persist an operation ID and intended base locally.
+2. Acquire commit coordination, verify ownership/fence and reread current heads. Compare
+   with the expected bases and check for out-of-band changes; disagreement is a conflict.
+3. Persist a prepared transaction with recovery information and assigned sequence. Retain
+   the previous content/version until publication is recoverable.
+4. Atomically replace each staged visible file, then its head, and publish the committed
+   journal record/head last. Use same-filesystem staging and supported durable flushes.
+5. Recover incomplete transactions under coordination before permitting overlapping
+   work; idempotent operation IDs prevent duplicate publication. Readers encountering
+   prepared work wait/retry or use the prior committed immutable version.
+6. Advance the local acknowledgement only after durable application or durable recording
+   of a conflict/exclusion/deferred job. Never skip a journal gap as if it were applied.
 
-## 6. Performance / CPU posture (req 6)
+Browsable files and metadata can temporarily differ during a crash window. Test recovery
+at every boundary; do not claim multi-file atomic visibility to File Station or other
+external readers. Concurrent noncooperating NAS writers remain a documented limitation:
+pre/post checks reduce races but cannot create CAS against arbitrary external writes.
 
-- LAN idle: watcher goroutine + ~1 stat/s on the journal. ~0% CPU.
-- Remote idle: fully dormant (only serving the UI / awaiting explicit actions).
-- Burst: coalescer absorbs the storm → one commit per burst; hashing limited to dirty files
-  and cached by fingerprint; BLAKE3 is multi-GB/s.
-- Backpressure: if commit throughput < write rate, `maxWait` grows instead of the queue.
-- All file IO streaming, bounded buffers; the NAS tree is never fully enumerated in steady
-  state (LAN), and remote listing is depth/recursion-bounded.
+### 5.8 Conflicts, deletes and renames
 
----
+Track a common base for every path. Concurrent edit/edit, edit/delete, rename/edit and
+same-name create must preserve data and stop writes to the conflicted path. Tombstones
+represent intentional deletes, never disappearance caused by a failed traversal.
 
-## 7. Web UI (local webapp)
+- **Keep local / keep NAS:** show the candidates and apply the choice against their
+  current version IDs. A new intervening edit requires another comparison/choice.
+- **Keep different versions:** retain the chosen local and NAS contents, persist a local
+  pause for the original path, and perform no automatic push/pull/delete for it until
+  re-enabled. A safety copy is optional, not a substitute for keeping the local version.
+- Retain unresolved conflict versions independently of normal history expiration.
 
-Served by the daemon at `http://localhost:<port>` (Go templates + htmx + Tailwind via CDN,
-embedded with `go:embed`, single binary). The UI also acts as the "outside-LAN access
-portal": the same UI is reachable when the client is off-LAN and shows remote/on-demand
-actions.
+Use rename event information when available, otherwise verify identity/content against
+indexed state. Inodes can be reused; a fingerprint alone is insufficient proof. Preserve
+reuse on a verified rename and fall back to safe create/delete with content dedup when
+ambiguous. Prevent watcher feedback from applied downloads using expected generations/
+content, not by ignoring all events for a time window.
 
-- **Dashboard**: mode (LAN/remote/offline), queue depth, recent commits, per-PC activity.
-- **File list**: live tree from the local index in LAN mode; lazily-loaded remote view in
-  remote mode. Searchable, respects selective sync.
-- **File activity/versions**: click a file → history from its `.v` chain; **Open** fetches a
-  specific version on demand via block-diff (req 4).
-- **Remote upload**: explicit "push this file/selection" action (enabled only off-LAN by
-  explicit request; automatic in LAN mode). Clear UI labelling: *auto* on LAN vs *manual*.
-- **Conflicts**: badge + dialog (keep local / keep remote / keep both), preview.
-- **Settings**: NAS host/mount, SSH/SFTP remote endpoint, exclusions, coalesce knobs, scan
-  interval, pause/re-enable per path.
+### 5.9 Exclusions and retention
 
----
+Define local/remote exclusion precedence explicitly and test it in both directions.
+An excluded endpoint blocks automatic operations that would touch that endpoint, including
+deletions. Keep only minimal base/pause state needed to avoid treating exclusions as
+missing files. Re-inclusion schedules comparison, not a blind overwrite. Pruning is a
+separate explicit operation and is outside the initial release.
 
-## 8. QNAP specifics
+Bound local cache (initial 1 GiB), temporary staging, logs, history and journal storage.
+Persist last-use metadata in batches; do not touch it on every block read. Never evict
+unique pending upload bytes or pinned conflict/resume data; pause when space is exhausted.
+Propose normal history retention of 30 days and a configurable NAS storage quota, with
+conflicts and in-flight versions pinned. Show when pins prevent quota reclamation.
 
-- **Folder**: share, e.g. `/share/nas-sync`; data lands as normal browsable files (File
-  Station, QTS snapshots, HBS).
-- **LAN mount (SMB3)** in `/etc/fstab`:
-  ```
-  //192.168.1.x/nas-sync  /mnt/nas-sync  cifs  uid=1000,gid=1000,vers=3.1.1,_netdev,nofail,credentials=/etc/nas-sync.cred,x-systemd.automount  0 0
-  ```
-  `credentials` file `chmod 600`. NFSv4 alternative.
-- **Off-LAN access**: enable QNAP SSH, reach the NAS via WireGuard (recommended) or a
-  port-forward / myQNAPcloud DDNS. The app consumes an SFTP endpoint
-  `host:port/user + SSH key`; it never tunnels or ports itself.
-- QNAP SMB caveats to validate early: SMB3 multichannel, case-sensitivity policy (QNAP
-  shares default case-insensitive → normalize or reject conflicting-case names), locking
-  semantics (our coordination uses atomic renames + O_EXCL, SMB-safe).
-- No Container Station / QPKG / myQNAPcloud client logic involved for LAN sync.
+Use checkpointed, resumable mark/sweep or another verified reachability scheme under
+commit-safe coordination. Protect current versions, retained history, conflicts and active
+transactions. Publish checkpoints before pruning journal segments. PCs older than the
+retention horizon reconcile from a checkpoint against their retained bases (or conflict
+if the base is unavailable), rather than replaying missing history or resurrecting deletes.
+GC and compaction run only on eligible LAN connections, in bounded low-priority slices.
 
----
+### 5.10 Reliability and resource enforcement
 
-## 9. Repository layout (Go)
+Use bounded retries with exponential backoff/jitter, per-path failure state, cancellation
+and a global failure circuit breaker. Disk-full, invalid manifests and checksum failures
+must preserve the last committed version. Bound input sizes, block counts and directory
+pages before allocation. Protocol faults must not trigger tight retry loops.
 
-```
-nas-sync/
-  cmd/nas-sync/            main: CLI + daemon + embedded web UI
-  internal/
-    config/                config schema + defaults + validation
-    nasfs/                 filesystem interface; mount adapter; sftp adapter; atomic helpers
-    mode/                  LAN vs remote mode detection + guard rules
-    index/                 bbolt store: local tree, fingerprints, block cache, remote view
-    watch/                 fsnotify recursive watcher + rename pairing
-    coalesce/              debounce/chunking of dirty paths
-    hash/                  BLAKE3 block hashing + cache
-    diff/                  block diff, append-patch, in-place & copy planner
-    store/                 NAS chunk store + .v manifests + history chain
-    journal/               cooperative change journal (read/write, seq/HLC)
-    clock/                 hybrid logical clock + monotonic seq
-    engine/                orchestrator: LAN sync / remote on-demand / conflict FSM
-    conflict/              detection + resolution records
-    remote/                SFTP on-demand client (browse/download/open/explicit upload)
-    api/                   localhost HTTP/JSON API for the UI
-    web/                   templates + embedded assets
-  deploy/
-    nas-sync.service       systemd user unit
-    fstab.example          SMB3 mount example
-    ssh.example            SSH/SFTP remote endpoint example
-  go.mod
-```
+Expose separate foreground/background limits. Start background hashing and transfer
+with one worker each, reusable buffers, read pacing (initial 20 MiB/s) and a CPU duty
+budget. One goroutine or a fast hash alone does not cap CPU. Provide a systemd user
+service example with low CPU/I/O priority and an optional enforced CPU quota; measure
+its effect. Track NAS helper resources too. Large files may take longer rather than
+monopolize CPU. Manual actions can use a separately configured higher budget.
 
-Module path placeholder: `nas-sync`.
+## 6. Performance acceptance budgets
 
----
+Measure on a documented reference PC/NAS/network with warm and cold caches. Use process
+CPU time, RSS/allocations, bytes read/hashed, requests, disk/temp bytes and **actual wire
+bytes in both directions**. Separate payload/metadata/protocol/retries and LAN/WAN.
+App counters alone cannot prove SMB copy offload or absence of WAN packets.
 
-## 10. Milestones & acceptance criteria
+| Scenario | Initial acceptance target |
+|---|---|
+| 10 min idle, no UI interaction | Average daemon CPU ≤0.1% of one core; no content reads/hashes. Remote/offline: zero app-initiated WAN requests/bytes, including UI dependencies. |
+| Quiet LAN, scan not due | At most one journal-head poll per 30 s after backoff; no unchanged cursor writes, whole-tree listing or content reads. Record protocol keepalive/metadata bytes separately. |
+| 100,000 tracked paths | Idle RSS target ≤128 MiB; no unbounded per-path goroutines or in-memory full manifests. Record watch/index overhead; lower limits cause visible backpressure. |
+| Sustained churn for 10 min | Background process CPU target ≤10% of one core on average; pending memory stays capped, quiet files progress, cancellation responds within 1 s between cancellable I/O operations. |
+| 500 writes to one small file in 3 s | ≤3 eligible batches with the default window; after stabilization, converge to final content. Measure actual hashing passes as well as batch count. |
+| Rewrite with identical content | Zero content upload and no redundant content version; one bounded verification pass may still be necessary. |
+| 1 GiB file, one aligned 64 KiB edit | Missing content payload ≤64 KiB with a warm base; no unchanged payload round trip during NAS staging. Report metadata and wire overhead separately. |
+| Append and one-byte insertion near start | Verify final bytes and old version; record full hashing cost, reused bytes, metadata and wire totals. Shift-aware mode must demonstrate suffix reuse before passing the arbitrary-rewrite gate. |
+| WAN reopen cached unchanged version | Zero content bytes; only necessary bounded freshness metadata. No sibling prefetch or periodic background refresh. |
+| Disconnect/VPN/default-route change | No automatic WAN packets in controlled capture; no deletions caused by missing mount; bounded retry/worker count. |
+| Journal catch-up / external edits | Cooperating changes discovered within configured poll bound plus processing time; external edits within measured sweep coverage, with stale status when budget prevents it. |
 
-**M0 — Foundation** *(this session)*
-- Git repo, `.gitignore`, `PLAN.md`, Go module + package skeleton that compiles
-  (`go build ./...`), config loader, BLAKE3 block hasher, coalescer, with unit tests.
+The initial 5 GiB transfer is a streaming/bounded-memory test, not a delta-saving claim.
+Include empty/tiny files, 100,000 small files, sparse/large files, truncation, binary and
+compressed rewrites, rename storms, slow storage and high-latency WAN. Reject performance
+“wins” that lose events, skip conflicts, omit protocol traffic or corrupt content.
 
-**M1 — Local observation (no NAS yet)**
-- Recursive watcher + fingerprint cache + coalesced commit events; rename pairing.
-- **Accept**: 500 writes in 3 s ⇒ ≤3 commit units; near-zero idle CPU.
+## 7. Local web UI and configuration
 
-**M2 — Push to the NAS share (LAN mode core)**
-- `nasfs` mount adapter (temp-dir for tests), chunk store, `.v` manifests, journal, first
-  full-sync, block-diff + append-patch, atomic rename, per-PC state.
-- **Accept**: initial 5 GB sync; re-sync of a rewritten 1 GB file transfers only changed
-  blocks (assert via counters). Hermetic tests on temp dirs.
+Embed templates and all necessary CSS/JS with `go:embed`; use simple Go templates and
+minimal JavaScript (vendored htmx if useful). **No runtime CDN, web fonts, analytics or
+update checks.** Tailwind, if used, is compiled at build time. Render paginated/indexed
+views and coalesced event updates only while a UI client is connected; stop hidden-tab
+refresh work. Opening the dashboard does not initiate WAN access.
 
-**M3 — Pull, journal, mode guard**
-- Journal-driven pull, dir-mtime out-of-band scan, LAN/remote **mode detection**, guard
-  rules (no auto upload off-LAN), reconnect full reconciliation.
-- **Accept**: second client root converges via journal only; toggling mount off stops all
-  background transfer; reconnecting reconciles both directions.
+Bind explicitly to loopback, validate origin/Host and protect mutating requests against
+CSRF. Show LAN eligibility/reason, paused/dirty/conflict states, data freshness, bytes
+transferred, resource limits and retention pressure. File previews/open/version actions
+are explicit and bounded; do not execute downloaded files automatically.
 
-**M4 — Selective sync, conflicts, remote on-demand**
-- Exclusion sets; conflict CAS + resolution records incl. **keep both** (per-path pause);
-  SFTP remote adapter: browse/download/open-version on demand + **explicit upload** only.
-- **Accept**: divergent simultaneous edits ⇒ conflict, no data loss, choices persist; with
-  the mount absent, downloads work over the SFTP adapter and uploads require an explicit UI
-  action.
+Settings include roots, LAN identity/interface policy, transport capabilities, verified
+SSH endpoint, selective sync, coalescing, background budgets, listing freshness, cache/
+history quotas and per-path pauses. Update `config.example.json` together with each
+implemented field; distinguish defaults from effective limits.
 
-**M5 — Web UI**
-- Dashboard, file list, version history + open, conflict dialogs, settings, remote view +
-  explicit push controls.
-- **Accept**: full workflow from a browser on `localhost`, LAN and remote mode.
+## 8. Implementation order and acceptance gates
 
-**M6 — Hardening & real-NAS E2E**
-- Clock-skew fault injection, crash/resume (kill -9 mid-commit), backoff storms,
-  self-heal, `go vet` + `staticcheck` + race detector, benchmarks; E2E against the real
-  QNAP SMB mount **and** real SSH/SFTP remote path; results in `docs/e2e-qnap.md`.
+- [x] **M0a — Existing foundation:** module, CLI, config, hashing/coalescing unit tests.
+- [x] **M0b — Harden foundations and measure:** hashing/coalescing/config fixes,
+  cancellation/slow-consumer/bounded-queue tests, hashing/allocation benchmarks and local
+  resource/network-syscall harnesses implemented. Actual transport wire measurements
+  remain in M2/M6; a local syscall trace cannot prove NAS offload.
+- [ ] **M1 — Local observation (substantially implemented):** persistent index, recursive
+  watcher, exclusions, bounded ingestion, batched metadata writes and restart/overflow
+  reconciliation are working. Local idle/burst measurements and filesystem integration
+  tests pass, including a 100,000-file idle memory check (~58.7 MiB RSS). Complete
+  long-duration budgets, retry/fairness under scan storms and
+  generation-aware transfer scheduling/feedback suppression before closing this gate.
+- [ ] **M2 — LAN safety and NAS feasibility:** local SMB mount/route diagnostics and
+  kernel-CIFS discovery are implemented; GVFS compatibility paths remain test-only.
+  The prepared QNAP mount passed the bounded client-side read/write probe, but
+  automatic writes remain disabled. Implement the enforced policy gate **before any
+  automatic write**. Measure offload, durability, cross-protocol coordination and
+  failure recovery on the real QNAP. Record the native/helper decision and supported
+  deployment matrix (§3). Temp-dir tests cover logic, not SMB/NFS/SFTP semantics. Do
+  not claim hard guarantees without E2E.
+- [ ] **M3 — Correct bidirectional core:** immutable versions, diff planning/materialization,
+  recoverable transactions, journal/checkpoints, acknowledgements, conflict pause and
+  tombstones from the first write-capable engine. Verify two-client divergence, clock
+  skew, each crash boundary, disk full and route loss. Then pass byte-saving budgets.
+- [ ] **M4 — Low-cost discovery and lifecycle:** adaptive polling, paced external scans,
+  reconnect comparison, retention/GC and old-cursor recovery. Verify existing-file edits
+  with unchanged parent directory timestamps and no repeated whole-tree rehash.
+- [ ] **M5 — WAN actions and UI:** cached views, bounded explicit SFTP/helper actions,
+  resumable diff downloads/uploads and conflict choices. Embed all assets. Pass packet
+  captures for idle WAN and selection-only operations, including unsupported-copy cases.
+- [ ] **M6 — Release hardening:** benchmark documented workloads on the actual NAS; run
+  build/tests/vet/race checks, integration fault injection and long churn tests. Document
+  setup, limits, LAN enforcement, recovery and measured CPU/network costs.
 
----
+Planned packages: `index`, `watch`, `scheduler`, `languard`, `nasfs`, `diff`, `store`,
+`journal`, `engine`, `conflict`, `remote`, `api`, `web`, alongside existing `config`,
+`hash`, `coalesce`. Add dependencies/packages when their milestone needs them; avoid an
+unused skeleton, redundant clock framework or mandatory frontend toolchain.
 
-## 11. Risks & open questions
+## 9. Remaining decisions
 
-- **SMB locking semantics** — mitigated by atomic rename CAS; spike on the real share in M2.
-- **In-place patching over CIFS** — fallback to block-wise copy always available; spike early.
-- **WAN diff transfers** — SFTP random-access reads are feasible but slower; on-demand diffs
-  may fall back to whole-file download for pathological layouts. Acceptable; measure in M4.
-- **Case sensitivity** on QNAP shares — decide normalize/reject policy before M2.
-- **Remote endpoint security** — SSH keys, known_hosts pinning; VPN recommended. Enforced
-  read-only unless explicit write.
-- Open for user: module path/remote URL; UI framework (Go templates + htmx proposed);
-  sync root + NAS folder; block size & coalesce defaults (tunable).
-- Multi-PC is secondary (Linux-only client), but journal/`pcs` design keeps it open without a
-  NAS process.
+Resolve through M1/M2 measurements: actual QNAP/transport features and access paths;
+whether a helper is needed; safe common coordination; fixed versus shift-aware chunking;
+small-block storage layout; realistic scan freshness and CPU budgets on the target PC.
+Do not mark these as “locked” based on the previous plan's assumptions. Preserve the
+requirements when capabilities are absent, and explain the blocked mode to the user.
 
----
+## 10. Technical references for corrected assumptions
 
-## 12. First concrete build steps
-
-1. `go mod init` + compiling package skeleton.
-2. Implement `internal/config`, `internal/hash`, `internal/coalesce` with unit tests.
-3. `go build ./...` + `go test ./...` green.
-4. Continue M1…M6 in subsequent sessions.
+- [fsnotify documentation](https://github.com/fsnotify/fsnotify): recursive watch setup,
+  directory watching for editor replacement, and limitations on mounted network filesystems.
+- [Linux inotify](https://www.man7.org/linux/man-pages/man7/inotify.7.html): event format,
+  overflow and races; events do not provide modified byte ranges.
+- [Linux rename](https://www.man7.org/linux/man-pages/man2/rename.2.html): atomic name
+  replacement is not a conditional comparison of manifest versions or a multi-file transaction.
+- [Linux copy_file_range](https://www.man7.org/linux/man-pages/man2/copy_file_range.2.html):
+  filesystem-dependent copy/offload behavior; wire measurements remain necessary.
+- [OpenSSH protocol extensions](https://github.com/openssh/openssh-portable/blob/master/PROTOCOL):
+  discover SFTP copy/rename/fsync capabilities; do not assume the NAS supports them.

@@ -4,8 +4,10 @@
 package hash
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"io"
 
 	"github.com/zeebo/blake3"
@@ -37,9 +39,7 @@ func Sum(r io.Reader) (Digest, error) {
 
 // SumBytes hashes a byte slice and returns its digest.
 func SumBytes(b []byte) Digest {
-	h := blake3.New()
-	_, _ = h.Write(b) // hash writes never fail
-	return digestOf(h)
+	return Digest(blake3.Sum256(b))
 }
 
 func digestOf(h *blake3.Hasher) Digest {
@@ -65,41 +65,92 @@ type Block struct {
 	Size   int64
 }
 
-// Blocks reads r sequentially and splits it into blocks of blockSize bytes
-// (the last block may be shorter). The returned slice has one Block per chunk,
-// in file order. Hashing only ever reads each byte once.
-func Blocks(r io.Reader, blockSize int64) ([]Block, error) {
-	buf := make([]byte, blockSize)
-	var out []Block
+// MaxBlockSize bounds the working buffer even for untrusted manifests.
+const MaxBlockSize = 4 * 1024 * 1024
+
+// Stream hashes with one reusable buffer and delivers one digest at a time.
+// Cancellation is checked between reads and callbacks; it cannot interrupt a
+// blocked Reader. Network callers must additionally set transport deadlines.
+// A callback may pace work, persist a digest, or stop by returning an error.
+func Stream(ctx context.Context, r io.Reader, blockSize int64, emit func(Block) error) error {
+	if blockSize <= 0 || blockSize > MaxBlockSize {
+		return fmt.Errorf("block size must be in [1, %d]", MaxBlockSize)
+	}
+	if emit == nil {
+		return fmt.Errorf("hash callback is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	buf := make([]byte, int(blockSize))
+	reader := &contextReader{ctx: ctx, r: r}
 	for i := 0; ; i++ {
-		n, err := io.ReadFull(r, buf)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n, err := io.ReadFull(reader, buf)
+		if cancel := ctx.Err(); cancel != nil {
+			return cancel
+		}
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			return err
+		}
 		if n > 0 {
-			out = append(out, Block{
-				Index:  i,
-				Digest: SumBytes(buf[:n]),
-				Size:   int64(n),
-			})
+			if e := emit(Block{Index: i, Digest: SumBytes(buf[:n]), Size: int64(n)}); e != nil {
+				return e
+			}
 		}
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			return out, nil
-		}
-		if err != nil {
-			return nil, err
+			return ctx.Err()
 		}
 	}
 }
 
-// BlockOffsets returns the ordered list of digests only, mirroring Blocks but
-// with an offset. Kept separate so callers that only need digests avoid the
-// allocation overhead of the full Block slice when convenient.
-func BlockDigests(r io.Reader, blockSize int64) ([]Digest, error) {
-	blocks, err := Blocks(r, blockSize)
+type contextReader struct {
+	ctx        context.Context
+	r          io.Reader
+	emptyReads int
+}
+
+func (r *contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.r.Read(p)
+	if n == 0 && err == nil {
+		r.emptyReads++
+		if r.emptyReads >= 100 {
+			return 0, io.ErrNoProgress
+		}
+	} else {
+		r.emptyReads = 0
+	}
+	return n, err
+}
+
+// Blocks is a convenience collector with O(number of blocks) memory. Use Stream
+// for large files or untrusted input sizes.
+func Blocks(r io.Reader, blockSize int64) ([]Block, error) {
+	var out []Block
+	err := Stream(context.Background(), r, blockSize, func(b Block) error {
+		out = append(out, b)
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	ds := make([]Digest, len(blocks))
-	for i, b := range blocks {
-		ds[i] = b.Digest
+	return out, nil
+}
+
+// BlockDigests collects digests directly, without an intermediate Block slice.
+func BlockDigests(r io.Reader, blockSize int64) ([]Digest, error) {
+	var out []Digest
+	err := Stream(context.Background(), r, blockSize, func(b Block) error {
+		out = append(out, b.Digest)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return ds, nil
+	return out, nil
 }

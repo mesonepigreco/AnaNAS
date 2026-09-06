@@ -52,7 +52,7 @@ func TestValidate(t *testing.T) {
 }
 
 // collect drains a batch channel until it closes, returning every path.
-func collect(ctx context.Context, ch <-chan []string) [][]string {
+func collect(ctx context.Context, ch <-chan Batch) [][]string {
 	var batches [][]string
 	for {
 		select {
@@ -60,7 +60,7 @@ func collect(ctx context.Context, ch <-chan []string) [][]string {
 			if !ok {
 				return batches
 			}
-			batches = append(batches, b)
+			batches = append(batches, b.Paths)
 		case <-ctx.Done():
 			return batches
 		}
@@ -115,7 +115,7 @@ func TestRunContinuousChurnCappedByMaxWait(t *testing.T) {
 	var batchCount int
 	for b := range out {
 		batchCount++
-		if len(b) != 1 || b[0] != "busy.log" {
+		if len(b.Paths) != 1 || b.Paths[0] != "busy.log" {
 			t.Fatalf("unexpected batch %v", b)
 		}
 	}

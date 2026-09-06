@@ -1,0 +1,8 @@
+# Install only after the manual CIFS capability test passes. Replace the NAS IP
+# and keep this credentials file outside the repository, mode 0600.
+#
+# The low actimeo value is useful while measuring freshness. Raise it after
+# measuring journal visibility if lower traffic is more important than faster
+# metadata refresh. x-systemd.automount is intentionally a later step: an
+# automount can initiate network I/O when a path is touched.
+//NAS_LAN_IP/nas-sync-test /mnt/nas-sync-test cifs credentials=/etc/nas-sync-test.cred,vers=3.1.1,cache=strict,serverino,actimeo=1,uid=1000,gid=1000,file_mode=0600,dir_mode=0700,_netdev,nofail,x-systemd.automount,x-systemd.idle-timeout=5min 0 0

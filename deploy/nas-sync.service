@@ -1,0 +1,19 @@
+[Unit]
+Description=Lightweight NAS sync local observer
+
+[Service]
+ExecStart=%h/.local/bin/nas-sync -config %h/.config/nas-sync/config.json
+Restart=on-failure
+RestartSec=30
+Nice=10
+IOSchedulingClass=idle
+# This caps the whole process to 10% of one CPU, including foreground work.
+# Remove/override only after measuring on the deployment machine.
+CPUQuota=10%
+MemoryHigh=128M
+MemoryMax=256M
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

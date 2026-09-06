@@ -1,22 +1,18 @@
 {
   "local": {
-    "root": "/home/me/Documents/sync"
+    "root": "/tmp/nas-sync-real-nas-local"
   },
   "nas": {
-    "host": "192.168.1.50",
-    "share": "nas-sync",
-    "mountPoint": "/mnt/nas-sync",
+    "host": "192.168.1.30",
+    "share": "nas-sync-test",
+    "mountPoint": "/mnt/nas-sync-test",
     "protocol": "smb",
-    "interface": "enp3s0",
+    "interface": "eno1",
     "prefix": "192.168.1.0/24"
   },
   "remote": {
     "enabled": false,
-    "host": "nas.example.com",
-    "port": 22,
-    "user": "darth",
-    "keyFile": "/home/me/.ssh/id_ed25519",
-    "knownHosts": "/home/me/.ssh/known_hosts"
+    "port": 22
   },
   "coalesce": {
     "idle": "1.5s",
@@ -25,10 +21,7 @@
     "maxBytes": 4194304
   },
   "selectiveSync": {
-    "excludeLocal": [
-      "node_modules/",
-      "*.tmp"
-    ],
+    "excludeLocal": [],
     "excludeRemote": []
   },
   "lanGuard": true,
@@ -41,5 +34,5 @@
     "maxWatches": 100000,
     "cacheBytes": 1073741824
   },
-  "stateDir": ""
+  "stateDir": "/tmp/nas-sync-real-nas-state"
 }

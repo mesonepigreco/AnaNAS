@@ -1,16 +1,5 @@
-// Package coalesce merges bursts of file-system events into a single commit
-// unit ("chunk") so that a constantly-writing process produces one block-diff
-// rather than thousands (PLAN.md §5.3). It is the implementation of
-// PROJECT.md requirement 7.
-//
-// Semantics:
-//   - The batch opens on the first event after a flush.
-//   - A quiet period of Idle since the last event closes the batch.
-//   - A continuously-active batch is force-closed after MaxWait from its start.
-//
-// The policy itself lives in ShouldFlush (pure, unit-testable). Run wires it to
-// an event channel using a lightweight ticker that is only armed while events
-// are pending, so idle cost is zero.
+// Package coalesce merges events into bounded batches without blocking event
+// ingestion on a slow consumer. Overflow requests reconciliation, never deletion.
 package coalesce
 
 import (
@@ -20,14 +9,17 @@ import (
 	"time"
 )
 
-// Config tunes the coalescing behaviour.
+const DefaultMaxPending = 10000
+const DefaultMaxBytes = 4 << 20
+
 type Config struct {
-	Idle    time.Duration // quiet time after the last event that closes the batch
-	MaxWait time.Duration // hard cap on batch lifetime while events keep arriving
-	Tick    time.Duration // evaluation granularity; must be > 0
+	Idle, MaxWait time.Duration
+	// Tick is accepted for configuration compatibility; deadline timers replace it.
+	Tick       time.Duration
+	MaxPending int
+	MaxBytes   int
 }
 
-// Validate returns an error if the configuration is unusable.
 func (c Config) Validate() error {
 	if c.Idle <= 0 {
 		return fmt.Errorf("idle must be positive")
@@ -35,108 +27,158 @@ func (c Config) Validate() error {
 	if c.MaxWait < c.Idle {
 		return fmt.Errorf("maxWait must be >= idle")
 	}
-	if c.Tick <= 0 || c.Tick > c.Idle {
-		return fmt.Errorf("tick must be in (0, idle]")
+	if c.Tick < 0 || c.Tick > c.Idle {
+		return fmt.Errorf("tick must be in [0, idle]")
+	}
+	if c.MaxPending < 0 || c.MaxPending > 100000 {
+		return fmt.Errorf("maxPending must be in [0, 100000]")
+	}
+	if c.MaxBytes < 0 || c.MaxBytes > 64<<20 {
+		return fmt.Errorf("maxBytes must be in [0, 67108864]")
 	}
 	return nil
 }
 
-// ShouldFlush is the pure coalescing decision.
-//
-// batchOpen reports whether any event is currently pending; start/last are the
-// times of the first and last event of the open batch; now is the evaluation
-// time. A flush is due when the batch has been quiet for idle, or when it has
-// lived for maxWait even under continuous churn.
-func ShouldFlush(batchOpen bool, start, last, now time.Time, idle, maxWait time.Duration) bool {
-	if !batchOpen {
-		return false
-	}
-	return now.Sub(last) >= idle || now.Sub(start) >= maxWait
+func ShouldFlush(open bool, start, last, now time.Time, idle, maxWait time.Duration) bool {
+	return open && (now.Sub(last) >= idle || now.Sub(start) >= maxWait)
 }
 
-// Coalescer merges incoming path events and emits batches of unique paths.
-type Coalescer struct {
-	cfg Config
+type Batch struct {
+	Paths []string
+	// Rescan supersedes Paths. The consumer must reconcile the root; paths were
+	// deliberately collapsed after exceeding the memory budget or an event gap.
+	Rescan bool
 }
 
-// New returns a Coalescer. The Config is validated; invalid values panic, so
-// callers should Validate() first if they accept user input.
+// RescanPath is reserved for producers that report watcher overflow.
+const RescanPath = "."
+
+type Coalescer struct{ cfg Config }
+
 func New(cfg Config) *Coalescer {
 	if err := cfg.Validate(); err != nil {
 		panic(err)
 	}
-	return &Coalescer{cfg: cfg}
+	if cfg.MaxPending == 0 {
+		cfg.MaxPending = DefaultMaxPending
+	}
+	if cfg.MaxBytes == 0 {
+		cfg.MaxBytes = DefaultMaxBytes
+	}
+	return &Coalescer{cfg}
 }
 
-// Run processes events from in and sends a batch of unique, sorted paths on out
-// whenever the coalescing window closes. It returns when ctx is cancelled or in
-// is closed (flushing any pending batch before closing out).
-func (c *Coalescer) Run(ctx context.Context, in <-chan string) <-chan []string {
-	out := make(chan []string)
+// Run drains input while a batch is waiting for its consumer. At most two bounded
+// batches exist. Input close flushes remaining work; cancellation discards it, so
+// persistent consumers must reconcile on restart to cover shutdown event gaps.
+func (c *Coalescer) Run(ctx context.Context, in <-chan string) <-chan Batch {
+	out := make(chan Batch)
 	go c.run(ctx, in, out)
 	return out
 }
 
-func (c *Coalescer) run(ctx context.Context, in <-chan string, out chan<- []string) {
+func (c *Coalescer) run(ctx context.Context, in <-chan string, out chan<- Batch) {
 	defer close(out)
-
-	var pending map[string]struct{}
+	var timer *time.Timer
+	var alarm <-chan time.Time
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+	pending := make(map[string]struct{})
 	var start, last time.Time
-	var ticker *time.Ticker
-	var tickC <-chan time.Time
-
-	flush := func() {
-		if len(pending) == 0 {
-			return
+	var bytes int
+	var overflow, due bool
+	var ready *Batch
+	stop := func() {
+		if timer != nil {
+			timer.Stop()
 		}
-		paths := make([]string, 0, len(pending))
-		for p := range pending {
-			paths = append(paths, p)
-		}
-		sort.Strings(paths)
-		pending = nil
-		stopTicker(ticker)
-		ticker, tickC = nil, nil
-		select {
-		case out <- paths:
-		case <-ctx.Done():
-		}
+		alarm = nil
 	}
-
 	arm := func() {
-		if ticker == nil {
-			ticker = time.NewTicker(c.cfg.Tick)
-			tickC = ticker.C
+		deadline := minTime(last.Add(c.cfg.Idle), start.Add(c.cfg.MaxWait))
+		if timer == nil {
+			timer = time.NewTimer(time.Until(deadline))
+		} else {
+			timer.Reset(time.Until(deadline))
 		}
+		alarm = timer.C
 	}
-
 	for {
+		if ready == nil && due {
+			b := Batch{Rescan: overflow}
+			if !overflow {
+				b.Paths = make([]string, 0, len(pending))
+				for p := range pending {
+					b.Paths = append(b.Paths, p)
+				}
+				sort.Strings(b.Paths)
+			}
+			ready = &b
+			clear(pending)
+			bytes = 0
+			overflow = false
+			due = false
+			start = time.Time{}
+			stop()
+		}
+		if in == nil && ready == nil && start.IsZero() {
+			return
+		}
+		var send chan<- Batch
+		var value Batch
+		if ready != nil {
+			send = out
+			value = *ready
+		}
 		select {
 		case <-ctx.Done():
 			return
+		case send <- value:
+			ready = nil
 		case ev, ok := <-in:
 			if !ok {
-				flush()
-				return
+				in = nil
+				stop()
+				due = !start.IsZero()
+				continue
 			}
-			if pending == nil {
-				pending = make(map[string]struct{})
-				start = time.Now()
-			}
-			last = time.Now()
-			pending[ev] = struct{}{}
-			arm()
-		case <-tickC:
 			now := time.Now()
-			if ShouldFlush(pending != nil, start, last, now, c.cfg.Idle, c.cfg.MaxWait) {
-				flush()
+			if start.IsZero() {
+				start = now
 			}
+			last = now
+			if ev == RescanPath {
+				overflow = true
+				clear(pending)
+				bytes = 0
+			}
+			if !overflow {
+				if _, exists := pending[ev]; !exists {
+					if len(pending) >= c.cfg.MaxPending || len(ev) > c.cfg.MaxBytes-bytes {
+						overflow = true
+						clear(pending)
+						bytes = 0
+					} else {
+						pending[ev] = struct{}{}
+						bytes += len(ev)
+					}
+				}
+			}
+			if !due {
+				arm()
+			}
+		case <-alarm:
+			due = true
+			stop()
 		}
 	}
 }
-
-func stopTicker(t *time.Ticker) {
-	if t != nil {
-		t.Stop()
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
 	}
+	return b
 }
