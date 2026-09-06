@@ -13,11 +13,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
-import stat
 import subprocess
 import sys
-import time
 import uuid
 
 
@@ -40,6 +39,54 @@ def mount_info(path: Path) -> dict:
 
 def fail(message: str) -> None:
     raise RuntimeError(message)
+
+
+def cifs_stats(info: dict) -> dict | None:
+    """Read counters for the selected CIFS share, when the kernel exports them."""
+    if info.get("fstype") != "cifs":
+        return None
+    source = str(info.get("source", "")).replace("/", "\\").casefold()
+    if not source:
+        return None
+    try:
+        lines = Path("/proc/fs/cifs/Stats").read_text().splitlines()
+    except OSError:
+        return None
+    start = None
+    for index, line in enumerate(lines):
+        if not re.match(r"^\s*\d+\)\s+", line):
+            continue
+        unc = line.split(") ", 1)[1].strip().casefold()
+        if unc == source:
+            start = index + 1
+            break
+    if start is None:
+        return None
+    values = {}
+    for line in lines[start:]:
+        if re.match(r"^\s*\d+\)\s+", line):
+            break
+        match = re.search(r"^SMBs:\s+(\d+)", line)
+        if match:
+            values["smbs"] = int(match.group(1))
+            continue
+        match = re.search(r"^Bytes read:\s+(\d+)\s+Bytes written:\s+(\d+)", line)
+        if match:
+            values["read_bytes"] = int(match.group(1))
+            values["write_bytes"] = int(match.group(2))
+            continue
+        for label, key in (("Reads", "reads"), ("Writes", "writes"), ("IOCTLs", "ioctls")):
+            match = re.search(rf"^{label}:\s+(\d+)\s+total\s+(\d+)\s+failed", line)
+            if match:
+                values[key] = int(match.group(1))
+                values[f"{key}_failed"] = int(match.group(2))
+                break
+    required = {"read_bytes", "write_bytes", "reads", "writes", "ioctls"}
+    return values if required.issubset(values) else None
+
+
+def counter_delta(before: dict, after: dict) -> dict:
+    return {key: after[key] - before[key] for key in before if key in after}
 
 
 def main() -> int:
@@ -110,6 +157,7 @@ def main() -> int:
             exclusive = True
         else:
             exclusive = False
+        before_copy = cifs_stats(info)
         if hasattr(os, "copy_file_range"):
             with renamed.open("rb") as src, copied.open("wb") as dst:
                 remaining = len(payload)
@@ -118,10 +166,12 @@ def main() -> int:
                     if moved <= 0:
                         fail("copy_file_range made no progress")
                     remaining -= moved
+                os.fsync(dst.fileno())
             copy_mode = "copy_file_range"
         else:
             shutil.copyfile(renamed, copied)
             copy_mode = "userspace copyfile fallback"
+        after_copy = cifs_stats(info)
         copied_hash = hashlib.blake2b(copied.read_bytes(), digest_size=32).hexdigest()
         result.update({
             "status": "write/readback checks passed",
@@ -132,6 +182,14 @@ def main() -> int:
             "exclusive_create": exclusive,
             "same_filesystem": os.stat(renamed).st_dev == os.stat(copied).st_dev,
         })
+        if before_copy is not None and after_copy is not None:
+            result["server_copy_observation"] = {
+                "before": before_copy,
+                "after": after_copy,
+                "delta": counter_delta(before_copy, after_copy),
+                "payload_bytes": len(payload),
+                "interpretation": "CIFS counters can suggest an SMB server-side copy when IOCTLs increase without payload reads/writes; packet capture is still required for proof.",
+            }
         if not exclusive or copied_hash != payload_hash:
             fail("exclusive-create or copied payload check failed")
         print(json.dumps(result, indent=2))

@@ -88,6 +88,11 @@ route behavior. The real-NAS probe and setup are documented in `docs/e2e-qnap.md
 The read-only probe passed for both the prior GVFS path and the dedicated CIFS path.
 The disposable CIFS write probe passed for readback, same-filesystem rename,
 exclusive create, `fsync` and `copy_file_range`, and removed its temporary objects.
+Kernel CIFS debug data reports SMB 3.1.1, AES-128-GCM encryption, one active
+session channel and no advertised multichannel capability. A 106,593-byte
+same-share copy increased CIFS IOCTL counters by two without increasing payload
+read/write or read/write-operation counters; this is strong server-copy evidence,
+but packet capture is still required before treating offload as proven.
 
 Host preparation is complete for client-side testing: `mount.cifs` and `smbclient`
 are installed, the dedicated QNAP share and account are mounted, and
@@ -466,6 +471,7 @@ implemented field; distinguish defaults from effective limits.
 - [ ] **M2 — LAN safety and NAS feasibility:** local SMB mount/route diagnostics and
   kernel-CIFS discovery are implemented; GVFS compatibility paths remain test-only.
   The prepared QNAP mount passed the bounded client-side read/write probe, but
+  CIFS counters also provide strong, not packet-proven, server-copy evidence.
   automatic writes remain disabled. Implement the enforced policy gate **before any
   automatic write**. Measure offload, durability, cross-protocol coordination and
   failure recovery on the real QNAP. Record the native/helper decision and supported

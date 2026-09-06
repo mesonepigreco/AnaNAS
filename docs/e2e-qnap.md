@@ -22,6 +22,18 @@ passed: readback, same-filesystem rename, exclusive create, `fsync` and
 validates the client-visible CIFS behavior, not server-side offload, crash
 durability, multi-client fencing or WAN egress policy.
 
+Kernel CIFS debug data reports client CIFS version 2.59, dialect `0x311` (SMB
+3.1.1), negotiated AES-128-GCM encryption and server capabilities `0x300047`.
+The SMB multichannel capability bit is absent from that mask, and the active
+session has one channel. CIFS statistics sampled immediately around a 106,593-byte
+`copy_file_range` showed two successful IOCTLs with zero changes to payload read,
+payload write, read-operation or write-operation counters. This is strong client-side
+evidence of an SMB server-side copy path; it is not packet-level proof. One failed
+IOCTL exists in the cumulative counters from earlier operations, but none failed in
+the measured copy delta. The same cumulative counters report 21 session and 42
+share reconnects since `2026-09-06 12:53:24 UTC`; their cause is not isolated yet,
+so route/timeout stability remains an M2 blocker.
+
 The current session exposes two SMB shares through the user's GVFS FUSE mount:
 
 ```text
@@ -59,6 +71,9 @@ Use a disposable directory on the share for all destructive/fault-injection test
 | Required experiment | Status |
 |---|---|
 | Kernel CIFS mount, direct LAN route and disposable read/write probe | Passed on `//192.168.1.30/nas-sync-test`; host-side result recorded above |
+| SMB dialect/encryption/multichannel capability check | Passed: SMB 3.1.1, AES-128-GCM, one channel; multichannel capability absent |
+| Same-share server-side copy/offload | Strong CIFS-counter evidence from a 106,593-byte copy; packet capture still required |
+| Client flush/readback and same-volume publication checks | Passed for the disposable probe; power-loss/server-crash durability remains pending |
 | Route loss, VPN change, IPv6 and multichannel cannot send automatic WAN traffic | Pending dedicated packet capture and deployment egress policy |
 | Native same-volume server-side range copy, measured in both network directions | Pending |
 | Durable staged content and atomic name replacement | Pending |
@@ -71,6 +86,23 @@ Capture actual wire bytes including metadata, protocol overhead and retries. Run
 warm/cold-cache tests for a 1 GiB file with a 64 KiB edit, append, insertion, and
 same-content rewrite. An application byte counter or successful copy syscall does
 not establish offload. Temp-directory tests cannot establish NAS durability or locks.
+
+The automation account cannot open a packet socket because `tcpdump` requires the
+host's interactive sudo authorization. To close the offload gate, a host operator
+must run a narrow capture around the disposable probe, then stop it immediately:
+
+```sh
+sudo tcpdump -i eno1 -nn -s0 -w /tmp/nas-sync-copy.pcap \
+  'host 192.168.1.30 and tcp port 445'
+# In a second terminal:
+python3 scripts/test_real_nas.py --write \
+  --mount-point /mnt/nas-sync-test \
+  --test-dir /mnt/nas-sync-test/nas-sync-capability-test
+```
+
+Inspect the capture for SMB2 IOCTL copy requests and the absence of a payload-sized
+read/write round trip. Keep the capture on the host and remove it after measurement;
+it may contain protocol metadata.
 
 The CIFS probe satisfies the client-side setup gate, but automatic synchronization
 is still disabled until wire measurements, server-side copy/offload, durability,

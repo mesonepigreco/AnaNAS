@@ -36,8 +36,10 @@ test child:   /mnt/nas-sync-test/nas-sync-capability-test
 
 The disposable client-side probe has passed. It does not prove server-side
 `copy_file_range` offload, durability, crash recovery, multi-client fencing, or WAN
-egress safety. The live mount reports `soft`; include its timeout behavior in the
-pending failure-recovery tests. GVFS paths under `/run/user/1000/gvfs` are
+egress safety. CIFS counters showed a same-share copy using successful IOCTLs with
+no payload read/write delta, which is strong evidence but still requires packet
+capture. The live mount reports `soft`; include its timeout behavior in the pending
+failure-recovery tests. GVFS paths under `/run/user/1000/gvfs` are
 inspection-only and must never be treated as automatic-sync mounts.
 
 ## Non-negotiable design constraints
