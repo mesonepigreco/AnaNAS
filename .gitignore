@@ -3,6 +3,7 @@
 /bin/
 /dist/
 *.exe
+AGENTS.md
 
 # Go build/test artifacts
 *.test

@@ -1,4 +1,4 @@
-# anaNAS 🍍
+# AnaNAS 🍍
 
 A Go synchronizer in development, guided by [PROJECT.md](PROJECT.md) and
 [PLAN.md](PLAN.md). An explicitly approved **LAN-only sync trial is now installed**
