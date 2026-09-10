@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 
 
@@ -132,8 +133,10 @@ def main() -> int:
         print(json.dumps(result, indent=2) if args.json else json.dumps(result, indent=2))
         return 0
 
-    if info.get("fstype") == "fuse.gvfsd-fuse" or str(mount_point).startswith("/run/user/"):
-        result["warning"] = "the selected path is a user-space GVFS/FUSE path; results do not qualify it for automatic sync"
+    if info.get("fstype") != "cifs" or str(mount_point).startswith("/run/user/"):
+        fail("write probes require a kernel CIFS mount; GVFS and other filesystems are inspection-only")
+    if "ro" in str(info.get("options", "")).split(","):
+        fail("write probes require a host-side writable mount")
     token = f".nas-sync-capability-{os.getpid()}-{uuid.uuid4().hex}"
     source = test_dir / f"{token}.source"
     renamed = test_dir / f"{token}.renamed"
@@ -158,6 +161,7 @@ def main() -> int:
         else:
             exclusive = False
         before_copy = cifs_stats(info)
+        copy_started_ns = time.time_ns()
         if hasattr(os, "copy_file_range"):
             with renamed.open("rb") as src, copied.open("wb") as dst:
                 remaining = len(payload)
@@ -171,6 +175,7 @@ def main() -> int:
         else:
             shutil.copyfile(renamed, copied)
             copy_mode = "userspace copyfile fallback"
+        copy_finished_ns = time.time_ns()
         after_copy = cifs_stats(info)
         copied_hash = hashlib.blake2b(copied.read_bytes(), digest_size=32).hexdigest()
         result.update({
@@ -181,6 +186,11 @@ def main() -> int:
             "copy_blake2b": copied_hash,
             "exclusive_create": exclusive,
             "same_filesystem": os.stat(renamed).st_dev == os.stat(copied).st_dev,
+            "copy_window": {
+                "start_unix_ns": copy_started_ns,
+                "end_unix_ns": copy_finished_ns,
+                "scope": "source/staging opens, copy, destination fsync and closes; excludes later copied-content readback",
+            },
         })
         if before_copy is not None and after_copy is not None:
             result["server_copy_observation"] = {

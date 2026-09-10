@@ -160,6 +160,13 @@ func Evaluate(n config.NAS, mounts []Mount, routes []Route, physical bool, addre
 	if len(routes) != 1 || routes[0].Dev != n.Interface || routes[0].Gateway != "" || (routes[0].Type != "" && routes[0].Type != "unicast") {
 		return deny("route is ambiguous, uses a gateway, or leaves the permitted interface")
 	}
+	return EvaluateMount(n, mounts)
+}
+
+// EvaluateMount checks only mount metadata. A native transfer client must also
+// validate its exact source-bound physical LAN route before using this result.
+func EvaluateMount(n config.NAS, mounts []Mount) Result {
+	deny := func(s string) Result { return Result{Reason: s} }
 	var match *Mount
 	for i := range mounts {
 		m := &mounts[i]

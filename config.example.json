@@ -1,4 +1,5 @@
 {
+  "sync": {"enabled": false},
   "local": {
     "root": "/home/me/Documents/sync"
   },

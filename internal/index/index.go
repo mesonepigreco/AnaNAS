@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -31,7 +32,10 @@ type Record struct {
 	Scan        uint64
 }
 
-type DB struct{ db *bolt.DB }
+type DB struct {
+	db       *bolt.DB
+	uploadMu sync.Mutex
+}
 
 func Open(filename, root string) (*DB, error) {
 	if err := os.MkdirAll(filepath.Dir(filename), 0700); err != nil {
@@ -41,7 +45,7 @@ func Open(filename, root string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	d := &DB{db}
+	d := &DB{db: db}
 	err = db.Update(func(tx *bolt.Tx) error {
 		if _, e := tx.CreateBucketIfNotExists(files); e != nil {
 			return e
@@ -52,6 +56,9 @@ func Open(filename, root string) (*DB, error) {
 		}
 		if old := m.Get([]byte("root")); old != nil && string(old) != root {
 			return fmt.Errorf("index belongs to another root")
+		}
+		if e := initSyncState(tx); e != nil {
+			return e
 		}
 		return m.Put([]byte("root"), []byte(root))
 	})
@@ -91,6 +98,9 @@ func (d *DB) Put(records []Record, force bool) error {
 				return err
 			}
 			if err = b.Put([]byte(r.Path), encoded); err != nil {
+				return err
+			}
+			if err = updateDirty(tx, r); err != nil {
 				return err
 			}
 		}

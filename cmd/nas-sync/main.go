@@ -11,6 +11,8 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"nas-sync/internal/control"
+	"nas-sync/internal/daemon"
 	"nas-sync/internal/hash"
 	"nas-sync/internal/index"
 	"nas-sync/internal/languard"
@@ -30,6 +32,7 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	printCfg := flag.Bool("print-config", false, "print the effective configuration and exit")
 	scanOnce := flag.Bool("scan-once", false, "index local metadata once, print status, and exit (no NAS access)")
+	identity := flag.Bool("client-identity", false, "print the persistent local client ID for provisioning (daemon must be stopped; no NAS access)")
 	checkLAN := flag.Bool("check-lan", false, "inspect local mount/route evidence without contacting the NAS")
 	discoverNAS := flag.Bool("discover-nas", false, "list visible kernel and GVFS network mounts without contacting them")
 	flag.Parse()
@@ -64,7 +67,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	log.Printf("nas-sync %s (config: %s)", version, *cfgPath)
+	log.Printf("anaNAS %s (config: %s)", version, *cfgPath)
 	log.Printf("local root: %s", cfg.Local.Root)
 	log.Printf("nas mount:  %s (host=%s share=%s)", cfg.NAS.MountPoint, cfg.NAS.Host, cfg.NAS.Share)
 
@@ -76,12 +79,16 @@ func main() {
 		}
 		return
 	}
-	if err := runObserver(ctx, cfg, *scanOnce); err != nil {
-		log.Fatalf("nas-sync: %v", err)
+	if err := runApplication(ctx, cfg, *scanOnce, *identity); err != nil {
+		log.Fatalf("anaNAS: %v", err)
 	}
 }
 
 func runObserver(ctx context.Context, cfg *config.Config, once bool) error {
+	return runApplication(ctx, cfg, once, false)
+}
+
+func runApplication(ctx context.Context, cfg *config.Config, once, identity bool) error {
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
@@ -153,6 +160,17 @@ func runObserver(ctx context.Context, cfg *config.Config, once bool) error {
 		return err
 	}
 	defer db.Close()
+	if identity {
+		id, err := db.ClientID()
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(map[string]string{"clientID": id})
+	}
+	controls, err := control.New(db)
+	if err != nil {
+		return fmt.Errorf("load persistent sync controls: %w", err)
+	}
 	observer, err := observe.New(&effective, db)
 	if err != nil {
 		return err
@@ -163,44 +181,62 @@ func runObserver(ctx context.Context, cfg *config.Config, once bool) error {
 		}
 		return json.NewEncoder(os.Stdout).Encode(observer.Status())
 	}
-	log.Printf("observing local metadata; NAS synchronization is disabled pending capability validation")
+	var live *syncRuntime
+	if cfg.Sync.Enabled {
+		live, err = openSync(&effective, resolved, db, observer)
+		if err != nil {
+			return fmt.Errorf("start LAN sync: %w", err)
+		}
+		defer live.Close()
+		log.Printf("native LAN synchronization enabled for the live trial")
+	} else {
+		log.Printf("observing local metadata; NAS synchronization is disabled")
+	}
+	run := func(surface daemon.Surface) error {
+		if live != nil {
+			return live.run(ctx, observer, controls.Changes(), surface)
+		}
+		return daemon.Run(ctx, observer, controls.Changes(), nil, surface)
+	}
 	if cfg.WebPort == 0 {
-		err = observer.Run(ctx)
+		err = run(daemon.Surface{})
 		if ctx.Err() != nil {
 			return nil
 		}
 		return err
 	}
-	statusServer, err := web.New(cfg.WebPort, func() any { return observer.Status() })
+	statusServer, err := web.NewWithControl(cfg.WebPort, func() any {
+		status := observer.Status()
+		reason := "NAS transfers disabled: synchronization engine and safety validation are incomplete."
+		var uploaded, downloaded uint64
+		if live != nil {
+			status.Mode = "native LAN synchronization — live trial"
+			reason = live.reason()
+			traffic := live.client.Traffic()
+			uploaded, downloaded = traffic.Sent, traffic.Received
+		}
+		return struct {
+			observe.Status
+			Paused          bool          `json:"paused"`
+			AutomaticWrites bool          `json:"automaticWrites"`
+			SyncReason      string        `json:"syncReason"`
+			UploadBytes     uint64        `json:"uploadBytes"`
+			DownloadBytes   uint64        `json:"downloadBytes"`
+			NAS             config.NAS    `json:"nas"`
+			Limits          config.Limits `json:"limits"`
+		}{Status: status, Paused: controls.Paused(), AutomaticWrites: live != nil, SyncReason: reason, UploadBytes: uploaded, DownloadBytes: downloaded, NAS: cfg.NAS, Limits: cfg.Limits}
+	}, controls.SetPaused)
 	if err != nil {
 		return fmt.Errorf("start local status UI: %w", err)
 	}
 	statusServer.Start()
 	log.Printf("local status UI: %s", statusServer.URL())
 
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	observerErr := make(chan error, 1)
-	go func() { observerErr <- observer.Run(runCtx) }()
-	var runErr error
-	observerDone := false
-	select {
-	case runErr = <-observerErr:
-		observerDone = true
-	case webErr := <-statusServer.Errors():
-		runErr = fmt.Errorf("local status UI: %w", webErr)
-	case <-ctx.Done():
-		runErr = nil
-	}
-	cancel()
+	runErr := run(daemon.Surface{Notify: statusServer.Notify, Errors: statusServer.Errors()})
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer shutdownCancel()
 	if shutdownErr := statusServer.Shutdown(shutdownCtx); shutdownErr != nil && runErr == nil && ctx.Err() == nil {
 		runErr = fmt.Errorf("stop local status UI: %w", shutdownErr)
-	}
-	if !observerDone {
-		// Ensure the observer has released its watcher and index before returning.
-		runErr = <-observerErr
 	}
 	if ctx.Err() != nil {
 		return nil

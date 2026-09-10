@@ -1,15 +1,210 @@
-# PLAN — `nas-sync`
+# PLAN — anaNAS
 
 A lightweight Linux folder synchronizer between a PC and a NAS, written in Go,
 with a local web UI. **[PROJECT.md](PROJECT.md) is the requirements source of truth.**
 This document translates its eight requirements into implementation steps; design
 proposals below do not add new hard requirements.
 
+### Current live checkpoint — 2026-09-10
+
+The first real PC reboot exposed a GNOME menu initialization race. The panel
+registered seven rows, but its first daemon snapshot emitted `LayoutUpdated`
+while GNOME AppIndicators was between its layout and deferred property requests.
+That client cancels the first load and can retain the default empty labels, which
+matched the visible seven hover targets with no text. The fixed menu now starts
+with the connecting layout as its baseline, so the first state uses property
+deltas only. Failed user actions send a desktop notification and disconnected
+status is contextual. Seven panel tests pass; the installed menu registered at
+revision zero with all labels populated.
+
+The same reboot successfully started the saved-credential CIFS mount, daemon and
+graphical indicator. A 104-byte PC file reached the NAS in 3.113 s and its deletion
+in 2.510 s; a separate 111-byte NAS file reached the PC in 2.001 s and its deletion
+in 2.001 s. Both fixtures were removed. Final status was unpaused, ready and
+`LAN sync active`. See `docs/live-trial.md` and `docs/startup.md`.
+
+The GNOME menu caching bug is fixed and the panel update installed. The daemon
+and exported DBus menu reported active sync while GNOME retained an old
+"transfers disabled" label: the panel emitted only `LayoutUpdated`, and the
+installed AppIndicators client fetches only type/child structure on that signal.
+Existing labels now emit bounded `ItemsPropertiesUpdated` deltas. Unit checks
+preserve no signals for unchanged metadata; real DBus menu clicks verified pause
+and resume label updates, with sync restored active. See the panel evidence in
+`docs/live-trial.md`.
+
+Production startup is now configured at the user's explicit request.
+`ananas-mount.service` and its scoped SMB firewall are enabled at boot; a
+NetworkManager dispatcher triggers later LAN mounts. User lingering is enabled
+for the PC daemon. A normal unmount/remount used the existing root-only saved
+credentials, and a subsequent exact file sync/cleanup passed. No NAS password
+was requested by runtime mounting or synchronization. The earlier manual-mount
+and before-login limitations below are historical. The 2026-09-10 PC reboot now
+supersedes that earlier pre-reboot evidence; a NAS reboot remains untested.
+The user also explicitly removed all safeguards/approval rules from AGENTS.md
+and authorized continued production operation/testing. Application requirements
+remain described in PROJECT.md. See `docs/startup.md` and its recorded evidence.
+
+The user explicitly approved the LAN-only trial before M2 completion. The PC
+worker and non-admin NAS helper are installed and running; the loopback status
+reports `automaticWrites: true`. Dedicated PC/NAS endpoint firewall rules are in
+place, and the initial 256 KiB verification file matches on both sides. Native
+NAS regular-file observation is enabled with a separate private index, 50 paced
+metadata operations/s, 8192 watches and 1.5–5 second coalescing. Selected changed
+files are captured at 2 MiB/s; equal-size edits may require one comparison pass
+plus one capture pass. No idle content polling was added. The full Go race suite
+passes with the helper's real local TLS/inotify import test.
+
+The folder update is now installed on both sides. Native NAS nested-file and
+empty-directory creation reached the PC in 3.612 s; a PC edit returned to the
+NAS in 0.992 s with matching hashes. Directory capture seals an identity receipt
+without listing children; child-driven directory timestamp/size changes do not
+create false local conflicts or duplicate directory versions. The full Go race
+suite and vet passed. See the commands and scope in `docs/live-trial.md`.
+
+The subsequent regular-file deletion update is installed on both sides. A
+32 KiB observed file deleted on the NAS disappeared on the PC in 2.001 s;
+PC re-creation and deletion returned to the NAS in 1.957 s and 2.068 s.
+Native absence capture verifies an accessible parent and unchanged root/mount,
+flushes the parent, and seals a receipt before committing the tombstone. It
+never deletes a visible path itself and retains the prior immutable version.
+Local tests cover receipt recovery after a later re-creation, safe refusal of
+uncertain paths, reservation cleanup, and preservation of a divergent PC edit.
+Reconfirmed absence now dirties an existing missing index record after each
+completed requested scan; this fixes coalesced create/delete and restart windows
+for previously observed paths, with no extra filesystem reads or idle polling.
+The full Go race suite and vet pass. See `docs/live-trial.md` for commands.
+
+Directory-tree deletion, journal heads that have never had an observer record
+(including a first create/delete entirely inside one coalescing window),
+conflict choices, history reclamation and
+remaining M2 acceptance are unfinished. The user removed the obsolete
+M2-before-sync rule from AGENTS.md and requested permanent NAS SSH access;
+these requests supersede earlier sequencing and SSH-disable instructions.
+The checkpoints below describe earlier
+builds unless explicitly updated; their disabled-write statements do not undo
+the later, explicit trial approval. Current evidence belongs in
+[live-trial.md](docs/live-trial.md).
+
 Reviewed against the source and existing code on 2026-09-06. The priority is
 correct synchronization with **minimal CPU, disk work, and network traffic**.
 Performance numbers below are proposed acceptance budgets, not measured results.
 
+### Active deployment target (2026-09-08)
+
+The user requested completing and deploying real synchronization, a background
+daemon and a desktop status icon with traffic, properties and pause/resume.
+The local directory `/home/darth-vader/NASdir` was created with mode `0700`.
+The selected NAS destination is a new dedicated share named `Nasdir`, separate
+from the disposable `nas-sync-test` share. QNAP share creation completed after
+the user approved read/write access for `nas-sync-test` and admin, with guest
+access denied. The manual CIFS mount is active at `/mnt/nasdir`, with SMB 3.1.1,
+`seal`, `cache=strict`, `serverino`, `actimeo=1`, `nosuid,nodev,noexec` and `soft`.
+The systemd user service is installed, enabled and running for this local folder,
+with the loopback dashboard at `http://127.0.0.1:8721/`. It currently tracks local
+metadata only and explicitly reports `automaticWrites: false`. The user unit
+enforces 10% of one CPU, `MemoryHigh=128 MiB` and `MemoryMax=256 MiB`.
+Do not treat the new local folder as a synchronized or backed-up location yet.
+The graphical-session panel service is installed and registered with GNOME's
+existing AppIndicators host. It shows an anaNAS label, sync state, payload totals,
+pause/resume, local-folder access and the dashboard. It receives bounded local
+event streams, has no idle polling and enforces a separate 5% CPU / 64–96 MiB
+memory budget. Pause from the menu, persistence across daemon restart, reconnect
+and dashboard-to-panel resume were verified. This does not enable real transfers.
+
+The user renamed the application **anaNAS**. The installed dashboard, launcher,
+service descriptions and panel label now use that brand. A static symbolic
+pineapple is the persistent panel icon, with separate state overlays. A colored
+pineapple is bundled in the dashboard and launcher. Existing service/config/state
+identifiers remain compatible, with an `anaNAS` command alias. No transfer gate
+was changed by this branding update.
+
+The host is Ubuntu GNOME Shell 50.1 on Wayland. QNAP's control panel reports
+TS-128A, QTS 5.2.6.3195, Realtek RTD1295 ARM Cortex-A53 and 982 MB RAM.
+The existing test mount is `rw` in the host namespace; `eno1` still has the
+direct `192.168.1.0/24` route. Noninteractive sudo is unavailable; host
+authentication through a desktop prompt enabled the manual mount and a bounded
+packet capture. Egress rules have not been installed or validated.
+QNAP's Telnet/SSH panel limits SSH logins to administrators.
+The existing sync account remains non-admin; browser sign-in does not provide
+an SSH session or authorize reading any password.
+After automatic review initially rejected expanded administrator access, the user
+explicitly approved temporary SSH setup on port 22 and disabling it after setup
+and validation. The QNAP panel now reports the SSH setting applied. A visible
+Ptyxis desktop terminal was opened for user-entered authentication using
+`scripts/open_nas_admin_session.py`; authenticated access succeeded. Read-only
+inspection reports Linux 4.2.8/aarch64, admin UID 0, and rsync 3.0.7/protocol 30.
+`flock`, `python3`, `su` and `setpriv` were not found on that session's PATH.
+The PC content reader's `openat2` requirement does not work on this NAS kernel;
+NAS-side implementation needs a separately validated compatible path API.
+Close the temporary control session
+and disable NAS SSH when setup/validation finishes; do not leave this admin access
+as the automatic synchronizer's runtime identity.
+QNAP's per-share requested disk-flush option is enabled for `Nasdir`. The user
+approved QNAP's warning about temporary suspension of all NAS services. After
+applying, reopening the properties confirmed the checked option; the host CIFS
+mount remained `rw`, the existing disposable child passed its read-only probe,
+and the local observer service remained active. This is not crash-durability proof.
+
 ## 1. Requirements and design boundaries
+
+Live-trial priority (2026-09-09): the user explicitly requested focusing on a
+working installation and real use instead of completing broader edge-case
+validation first. An opt-in native LAN trial is being prepared for the existing
+`NASdir`/`Nasdir` pair. `sync.enabled` and helper `liveWrites` activate the existing
+transfer engine with private TLS identities, direct physical-LAN/mount gates,
+device-bound `SO_DONTROUTE` sockets and dedicated endpoint firewall rules. Defaults
+remain disabled. This user-authorized trial does not close M2 or represent full
+release acceptance. Cache/history capacity, conflicts and unsupported external
+NAS edits must be reported honestly; the complete objective remains active.
+
+After automatic review rejected activation under the earlier sequencing rule,
+the user explicitly approved enabling the LAN-only trial before M2 is complete,
+including daemon startup, sync writes and scoped firewall rules. The PC endpoint
+rule is now installed; the live trial is activated. Native inotify capture of
+regular-file edits now passes the local helper TLS/race fixture. External
+directory creation subsequently passed both local and real-NAS tests. External
+deletions and the full conflict dialog remain unfinished.
+
+Network lifecycle progress (2026-09-09): the tested daemon now preserves local
+observation and controls across transfer-session recovery. A bounded netlink
+subscription precedes each local-only LAN check; denied policy waits for an event
+without polling. Session/subscription failures retry with 1–60 second exponential
+backoff, with no healthy-idle timer; all previous services and pooled connections
+are released before reuse. A missing interface waits for link events. Read-only
+PC subscription, descriptor cleanup, lifecycle and TLS/inotify offline-edit replay
+tests pass, with one observer invocation across reconnects. Six actual kernel
+fault cases now pass in a fresh isolated PC namespace: route/address/link loss,
+interface recreation, a blocking rule and a gateway route, using lifecycle doubles
+around the real monitor/supervisor. Physical transfer faults, silent failures,
+QNAP, jitter, status UI wiring and final OS egress acceptance
+remain open. The installed observer does not instantiate this monitor or worker.
+[Scope and bounds](docs/network-lifecycle.md).
+
+Client progress (2026-09-09): authenticated `POST /v1/ack` now advances at most 32
+committed batches per request, binding logical client identity and exclusion policy.
+The PC persists confirmation separately from its durable completed prefix; the
+worker retries lost replies from that state and emits no idle acknowledgements.
+Local TLS/inotify, range/restart/refusal and full Go race tests pass. The NAS trusts
+the authenticated client's bookkeeping claim; no history reclamation uses it yet.
+Retention must account for all configured clients and current/in-flight/conflict
+pins. QNAP endpoint acceptance and deployment remain open.
+[Scope and tests](docs/acknowledgements.md).
+
+Storage progress (2026-09-09): the assembled native helper now requires durable
+publication reservations before intake/publishing. The example and disposable
+runner use 32 MiB and 128 history entries; exact retries preserve one charge and
+commits retain their historical charge. Local TLS refusal, process-kill recovery
+and full Go race checks pass. This bounds logical receiver admission, not physical
+disk allocation. PC mode now accounts for upload snapshots/wire spools and download
+publication together. Worker construction and outbox dispatch require a matching
+reservation; explicit untransmitted preparation abort credits only after durable
+cleanup. Local killed-process, quota-refusal and TLS/inotify worker tests pass.
+Completed uploads now reclaim only encoded spools after verified local adoption
+and before clearing their receipt/outbox. One batch directory flush precedes atomic
+wire credit; process-kill recovery completes without network or double credit.
+Snapshots and metadata remain charged. Retention/ACK/conflict pins, abandoned
+intake resolution and QNAP budget validation remain open; M2 and production writes
+remain disabled. [Details and commands](docs/cache-budget.md).
 
 | PROJECT.md | Planned behavior |
 |---|---|
@@ -38,6 +233,43 @@ examples/unverified deployment assumptions. Discover actual capabilities during 
 
 ## 2. Current repository and known gaps
 
+Latest addition (2026-09-09): the native helper executable, strict configuration,
+inherited device-bound socket and non-admin launcher now pass the real disposable
+QNAP TLS fixture. Upload/download each reuse 512 KiB for a one-byte update; the
+serialized update is 491 bytes. The 45-second helper reported 0.224948 seconds CPU
+and 9.6 MiB peak RSS, excluding launcher/SSH. Cleanup and unchanged parent owners
+were independently checked. See `docs/helper-service.md` for exact commands,
+binary-pinned evidence and limits. This advances authenticated native transport
+validation; M2 remains open. No production helper or transfer worker is installed.
+Egress enforcement, aggregate quota/retention, native SMB observation and remote
+notifications, recovery/conflicts and sustained resource validation remain open.
+
+Subsequent local integration now delivers remote commit hints over a persistent
+authenticated stream to `daemon.RunWithRemote`. The TLS/inotify worker test
+downloads a remote edit without an injected hint. Journal signals occur only
+after durable commit; reconnect retrieves the current sequence, and replay still
+uses the durable inbox cursor. One-slot hints and at most one frame per second
+bound notification work, with no idle heartbeat/poll. Tests cover missed commits,
+duplicate streams, concurrent transfers, protocol errors and shutdown joins.
+Real-QNAP stream validation now passes the expanded disposable fixture, including
+a two-second quiet stream with zero added encrypted bytes. Outgoing, inherited
+and accepted TCP sockets now verify device binding plus `SO_DONTROUTE`; the same
+fixture passes on QNAP with these flags. Final helper CPU was 0.245706 seconds and
+RSS 10.6 MiB for the small test, excluding launcher/SSH. This does not close M2:
+route-failure packet tests, external SMB observation, route/interface event
+cancellation and supervised reconnect deployment are still pending. See
+`docs/egress-policy.md`; no global firewall/routing rules or production writes changed.
+
+The subsequent isolated PC routing fixture now passes twelve cases with the actual
+socket-policy package: gateway/default/priority routes, established-connection
+route changes and server replies. Ordinary controls sent 27 captured TCP packets
+to the simulated gateway; constrained sockets sent zero and completed direct
+echoes. The capture retained 128 frames with zero kernel-reported drops. This
+advances the PC-kernel portion of M2; QNAP vendor-kernel route faults, live VPN/NAT,
+interface/address loss, network-event cancellation and full transfer recovery
+remain open. Exact commands, bounds, build hashes and scope are in
+`docs/egress-policy.md` and `docs/evidence/socket-routes-2026-09-09.json`.
+
 Implemented and exercised locally:
 
 - CLI/configuration with strict JSON, bounded sizes/work settings, disjoint root/state
@@ -53,6 +285,190 @@ Implemented and exercised locally:
 - A pure bounded diff planner that compares local/remote manifests against an
   acknowledged base, classifies push/pull/conflict without choosing a conflict winner,
   validates manifest bounds and deduplicates missing block payloads in manifest order.
+- A versioned binary BLAKE3 manifest codec with validation before allocation,
+  capped at 131,072 fixed blocks (8 GiB per file at 64 KiB). The local index now
+  persists a stable client ID, acknowledged manifests, global/per-path pause
+  intent and unresolved conflict identities. A transactionally maintained dirty
+  path index supports bounded work pages and preserves newer generations when
+  acknowledging an older completed transfer. These are local primitives;
+  conflict bytes still need immutable retention in the transfer engine.
+- A separate local content reader for future scheduled work, with read pacing,
+  fingerprint/root revalidation and digest verification before exposing upload
+  ranges. Linux `openat2` rejects symlinks, special files and child mounts, and
+  network/FUSE roots are rejected. It uses the existing pinned `x/sys` module
+  (now a direct dependency), one candidate handle and reusable block buffers.
+  The observer never calls this reader; automatic writes remain disabled.
+- A standalone bounded rolling delta encoder/receiver and binary base signatures.
+  Full base blocks can be reused after insertions/deletions; the receiver reads
+  reused bytes locally. Corrupt/truncated streams and excessive weak-checksum
+  verification work fail without fallback. A private native-filesystem staging
+  store uses exclusive partials, verified/flushed ready candidates and explicit
+  operation-scoped cleanup. Local tests include a killed receiver and retry;
+  these are not wired into the daemon or NAS transport. Limits and
+  remaining integration obligations are in `docs/delta-format.md`.
+- A native-filesystem cooperative journal with an exclusive lifetime database
+  lock, durable owner epochs, bounded prepared batches, expected-base conflict
+  checks, idempotent operation IDs, immutable version descriptions and contiguous
+  per-client cursors. A failed publisher leaves recovery work and blocks new
+  commits. Local tests exercise competing processes, killed-publisher recovery,
+  epoch rejection and journal gaps. A filesystem publisher is integrated in
+  local tests; NAS transport is not integrated and this does not fence
+  noncooperating SMB writers.
+  See `docs/journal-protocol.md` for the contract and remaining gates.
+- A native same-mount publisher now applies prepared file creates, replacements
+  and explicit deletes, retains immutable candidates and displaced inodes, and
+  replays interrupted publications. Local integration tests connect rolling
+  delta → staging → journal → visible files, including a killed process after
+  namespace exchange and partially published batches. It rejects unsafe paths
+  and preserves external-write conflicts across retries. Parent directories must
+  be committed before children. Directory creates and empty-directory deletes
+  now have durable identity receipts and local recovery tests; no recursive
+  directory deletion is performed. Adopting pre-existing directories into sync
+  state, scheduler ordering, conflict resolution, storage quotas and
+  full NAS failure/recovery acceptance remain open. The scoped native probe below
+  now exercises the basic primitives on QNAP. See `docs/publication.md`.
+- A separate `ananas-native-probe` executable and scoped SSH setup runner are
+  ready for native QNAP validation. The command passes local read-only/write
+  tests and cleanup, and cross-builds for ARM64. It exercises the real delta,
+  staging, journal and publisher with a 512 KiB fixture and a controlled
+  interruption before journal commit. All 11 checks now pass on the QNAP,
+  including a foreground run as UID 1000/GID 100 with 0.41039 seconds process
+  CPU and 7.8 MiB peak RSS for the small fixture. This does not close M2 or enable
+  automatic writes; network isolation, real disconnect/power-loss, multi-client
+  and sustained-resource acceptance remain open.
+  Commands and scope are in `docs/native-probe.md`.
+- An experimental authenticated HTTP transfer handler now integrates delta
+  upload/download, bounded multi-file batches, directory/tombstone publication,
+  idempotent retry and scoped recovery. Local TLS 1.3 tests exercise real temporary
+  files with verified, allowlisted client certificates. It caps active work,
+  accepted connections and reconstructed batch bytes, and paces reads. It is not
+  a deployed helper or daemon client; production egress, aggregate storage quota,
+  change replay and scheduling remain open. See `docs/transfer-api.md`.
+- The separate transfer client now binds a private literal endpoint, source IP
+  and interface, verifies TLS trust plus a server certificate pin, bounds response
+  metadata and checks download headers before staging output. Local TLS race tests
+  cover real diff round trips, cancellation, rejected responses and recovery.
+  Encrypted stream traffic counters notify through one coalesced slot. This is
+  not connected to the observer or desktop counters; route-change egress policy,
+  source/output pacing and scheduler integration remain required.
+- Authenticated journal-page reads now omit excluded path/version metadata while
+  retaining batch sequence and omitted-entry counts. Pages bind namespace and
+  exclusion policy; changed rules cannot silently reuse an old cursor. The local
+  index durably stores at most one page (32 batches), separates receipt from
+  completion and requires matching durable bases or conflict identities before
+  completing visible entries. Local TLS/restart/gap/backpressure tests pass.
+  The deployed observer does not fetch these pages. Replay coalescing,
+  durable conflict-content retention, remote acknowledgements and policy-change
+  reconciliation remain integration work.
+- Local binary manifests and the planner now distinguish directories from empty
+  files and tombstones. Directory bases persist through restart and can complete
+  received directory entries without erasing intervening dirty generations.
+  Committed version metadata now retains its path, permitting exact historical
+  content lookup without a journal scan. TLS tests retrieve an old version after
+  replacement/deletion and reject a lookup through another path. Older unbound
+  version metadata is usable only through its current head; migration/reconciliation
+  is explicit. These primitives do not schedule or publish replay automatically.
+- An explicit bounded replica pull now joins the transport downloader to verified
+  staging and native local journal/publication. It serializes one batch, paces
+  local base reads/staged writes, verifies reused staged candidates and scopes
+  pending recovery to the exact proposal. Tests pass for directory/file creation,
+  one-byte delta updates, explicit deletes, late failure, conflicting visible
+  edits and recovery without re-downloading. A TLS integration test publishes
+  matching content into two independent temporary PC roots. The operation has
+  no automatic caller and does not advance observer bases or remote cursors.
+  Upload/observer integration, scheduling/coalescing, aggregate quotas, durable
+  conflict resolution and real-NAS acceptance remain unfinished.
+- A local upload outbox now retains one bounded proposal, observed generations,
+  wire lengths and a commit receipt across restart. Preparation checks current
+  bases/types/generations and observed exclusion/pause/conflict flags; both
+  directions bind to the same remote namespace. Scoped operation-status reads
+  let the recovery helper save an exact prior commit without resending payload.
+  Receipt alone cannot clear work, and newer dirty generations survive completion.
+  Tests cover local restart and authenticated metadata recovery. Production wiring,
+  abandoned-intake resolution and unowned staging cleanup,
+  quotas and automatic scheduling are still required.
+- Local snapshot capture now reads a selected file once at an explicit rate,
+  creates an immutable candidate and its block/whole digests, and rechecks source
+  identity before sealing. Bounded delta encoding creates a separate durable
+  wire spool; its length and digest persist in the one-batch upload outbox.
+  Reopening a spool verifies size/digest/fingerprint before exposing paced bytes.
+  Local TLS tests connect snapshot → spool → outbox → upload → acknowledgement,
+  including one-byte diff reuse and preservation of a later dirty generation.
+  These remain explicit calls in tests; scheduler wiring, quotas,
+  incomplete-operation cleanup and NAS acceptance are still unfinished.
+- An explicit upload dispatcher now consumes one durable outbox, queries the
+  exact remote operation before opening spools, recovers prepared publication
+  without retransmission and saves a matching commit receipt. Requests bind a
+  configured journal namespace in addition to TLS identity. Local TLS tests
+  exercise upload, restart recovery without local spools, pause/exclusion/size
+  refusal and zero traffic when using a saved receipt. At most 128 read-only spool
+  handles are held for one 45-second batch; selected-path checks are linear in
+  batch size and there is no idle loop. This does not acknowledge local bases,
+  resolve orphan remote staging, provide aggregate quotas or enable the daemon.
+- The transfer handler now reserves one durable upload intake before receiving
+  content. The journal binds the complete proposal and checks vacant candidate
+  names, expected heads and version identities. Its lifetime lock and mutex
+  protect receive/resume through commit; intake becomes prepared publication in
+  one transaction. Exact retries verify retained candidates and can clean their
+  abandoned partials. Local tests cover killed-receiver ownership, truncated
+  multi-file TLS retry, corruption refusal and target-digest checks before sealing.
+  The transport's store must match the pinned journal directory. Retry still
+  sends the bounded wire spools; it does not negotiate omitted payloads. Unknown
+  artifacts, abandoned/conflicting intake resolution, quotas and real NAS
+  recovery acceptance remain open. No automatic service calls this protocol yet.
+- Upload completion now rebuilds fixed-block manifests from retained snapshots,
+  verifies their whole digests and records the authenticated remote result as
+  local logical replica heads without publishing visible files. One index
+  transaction saves the complete manifest batch and releases its outbox while
+  preserving later dirty generations. Recovery after the journal commit but
+  before the index transaction is idempotent. Local TLS tests cover subsequent
+  delta pull, visible-edit preservation and completion of the upload's own feed
+  entry. Directory inode adoption, observer-event reconciliation, conflict
+  resolution, quotas, scheduling and production configuration remain open.
+- Download completion now requires an exact committed local operation and
+  matching heads, verifies retained file manifests and atomically saves bases
+  with the oldest inbox batch's completion cursor. It leaves every observer
+  record and dirty generation intact; the explicit comparison below reconciles
+  selected publication-generated events. Directory/tombstone and fully excluded
+  batches need no content reads. Local tests cover TLS create/update/delete,
+  directory publication/deletion, restart, corruption and atomic rollback.
+  Puller construction now pins the configured remote namespace, refusing a
+  changed target or unbound prior history. The deployed daemon still does not
+  call it; remote cursor acknowledgement and full NAS acceptance remain open.
+- A bounded comparison now validates one observed path and its acknowledged
+  journal/index base, hashes regular content once at a configured rate and clears
+  an unchanged generation without contacting the NAS or creating a snapshot.
+  Otherwise authenticated heads/signatures drive a three-way decision; an unchanged
+  immutable remote version reuses the cached block manifest. Exact missing-leaf
+  checks require an accessible stable parent/root, and unacknowledged absence
+  cannot become delete intent. Tests cover zero-network reconciliation after TLS
+  download, cached-base reuse, independent conflicts and intervening events.
+  Comparison itself does not publish content or claim conflict-byte retention.
+  The upload builder below now consumes push decisions; automatic scheduling and
+  conflict materialization remain integration work.
+- Explicit upload preparation now joins selected-path comparison, stable snapshots,
+  local retained-base signature generation, delta encoding and a durable outbox.
+  At most 128 nonoverlapping paths share one preparation record, capped at 160 KiB.
+  Unused candidate IDs are durably claimed before content creation; the preparation
+  becomes the outbox in one index transaction. A failed preparation blocks new
+  work until explicit exact-ID abort, which leaves local source/dirty/base state
+  intact and refuses committed versions. Local TLS tests cover actual preparation
+  through initial upload, one-byte update, preserved newer edits and deletion.
+  A real killed-process fixture verifies recovery after snapshot creation; index
+  tests cover concurrent-builder/abort refusal and atomic promotion. This does not
+  add an automatic worker or production NAS writes. Storage quota/reservation,
+  committed-history retention, parent/child ordering and scheduler integration
+  remain required before automatic use.
+- A single replica worker now connects real observer completion hints and durable
+  controls to preparation/dispatch/completion and remote inbox pull/completion in
+  local TLS integration tests. It serializes operations, orders parent creation
+  before child uploads, reads bounded dirty pages and waits without idle polling
+  or error retry timers. Pause interrupts active operation contexts. The shared
+  daemon lifecycle runner is now used by the CLI with a nil transfer worker,
+  preserving metadata-only deployment while joining all services before storage
+  closes. Actual remote-hint delivery, out-of-band NAS observation, quotas, egress,
+  conflict/history and full directory reconciliation remain open. No automatic
+  production writes were enabled; details are in `docs/daemon-worker.md`.
 - A read-only `-check-lan` diagnostic for SMB mount/source identity and physical-interface /
   direct-route evidence. It performs no NAS probe and never enables automatic writes.
 - A `-discover-nas` command that reports kernel network mounts and user-session GVFS SMB
@@ -67,11 +483,11 @@ Go 1.27.1. See [README.md](README.md), [local measurements](docs/performance.md)
 [real-NAS validation status](docs/e2e-qnap.md). These results validate local observation,
 not the proposed synchronization protocol or the full ten-minute acceptance workloads.
 
-Remaining: persistent content manifests/acknowledged sync bases, transfer scheduling
+Remaining: wiring the persistent manifests/acknowledged bases into transfer scheduling
 and pacing, transport capability probes, write-capable LAN enforcement, diff
 materialization, journal/checkpoints, conflicts and paused-path resolution, retention,
-WAN actions and the full web UI. A loopback-only read-only status dashboard is now
-implemented; it does not initiate NAS work. No NAS content is accessed or modified by
+WAN actions and the full web UI. A loopback-only status dashboard with durable
+pause/resume intent is implemented; it does not initiate NAS work. No NAS content is accessed or modified by
 the current observer. Configuration settings for hashing throughput, cache size,
 remote scans and web/SSH endpoints are reserved and validated where applicable; they
 do not enable those future features.
@@ -89,10 +505,17 @@ The read-only probe passed for both the prior GVFS path and the dedicated CIFS p
 The disposable CIFS write probe passed for readback, same-filesystem rename,
 exclusive create, `fsync` and `copy_file_range`, and removed its temporary objects.
 Kernel CIFS debug data reports SMB 3.1.1, AES-128-GCM encryption, one active
-session channel and no advertised multichannel capability. A 106,593-byte
+  session channel and no advertised multichannel capability. A 106,593-byte
 same-share copy increased CIFS IOCTL counters by two without increasing payload
 read/write or read/write-operation counters; this is strong server-copy evidence,
 but packet capture is still required before treating offload as proven.
+
+The 2026-09-08 repeat adds packet evidence for that small same-share copy:
+8 captured packets / 2,053 captured frame bytes / 1,525 TCP payload bytes during
+the copy interval, with two successful CIFS IOCTLs and no payload read/write
+delta. This validates avoiding a client payload round trip for that test only.
+Arbitrary-range copies, large/shifted diff workloads, durability, fencing,
+recovery and WAN egress gates remain open. See `docs/e2e-qnap.md` for scope.
 
 Host preparation is complete for client-side testing: `mount.cifs` and `smbclient`
 are installed, the dedicated QNAP share and account are mounted, and
@@ -119,8 +542,8 @@ explicit scoped UI request → WAN policy gate → lazy SSH/SFTP → NAS
 NAS: browsable files + hidden immutable versions/content + journal + PC cursors
 ```
 
-Keep one daemon, a small embedded UI and one embedded metadata database (bbolt is a
-candidate, not yet a dependency). Store cached content as bounded files outside the
+Keep one daemon, a small embedded UI and the existing embedded bbolt metadata
+database. Store cached content as bounded files outside the
 sync root; do not put large blobs in a metadata database. No per-file goroutines.
 Separate transport capability checks from policy and from pure diff planning.
 
@@ -432,12 +855,32 @@ compressed rewrites, rename storms, slow storage and high-latency WAN. Reject pe
 
 ## 7. Local web UI and configuration
 
-The current implementation provides an opt-in, loopback-only read-only dashboard and
-`/api/status` endpoint. It binds only when `webPort` is nonzero, embeds its HTML/CSS/
-JavaScript, validates loopback Host/Origin headers, allows only GET/HEAD, uses
-`Cache-Control: no-store` and refreshes only while the browser tab is visible. It
-reports the observer's local status; it does not expose file contents or initiate NAS
-traffic. The full indexed file/conflict/action UI remains future work.
+The current implementation provides an opt-in, loopback-only dashboard and
+`/api/status` endpoint (GET/HEAD), plus `POST /api/pause` for durable pause/resume
+intent. It binds only when `webPort` is nonzero, embeds its HTML/CSS/JavaScript,
+validates loopback Host/Origin headers, uses `Cache-Control: no-store` and receives
+pushed status only while the browser tab is visible. Hiding the tab cancels its
+stream; idle UI connections have no heartbeat or polling. DOM text is updated
+only when different. Mutations require a random per-process
+CSRF header, an exact matching browser origin and at most 1 KiB of JSON input.
+The page uses a script nonce and rejects framing. Pause intent survives restart;
+local observation continues, and resume cannot override capability/LAN suspension.
+It reports the local observer, configured NAS identity, limits and transfer payload
+counters (currently zero). `automaticWrites` is explicitly false. It does not expose
+file contents or initiate NAS traffic. The Python/GIO desktop icon is implemented
+using the session-bus StatusNotifierItem/DBusMenu protocols. The token-guarded
+`/api/events` endpoint allows four streams, one pending hint per stream, and at
+most one snapshot per second during changes; idle connections have no timers.
+Writers have a five-second write deadline and shutdown closes streams explicitly.
+The indicator has one stream worker, one bounded command worker and at most one
+pending main-loop update; reconnect backoff is 1–30 seconds to loopback only.
+Menu/icon/title signals are emitted only when those displayed values change,
+so metadata-only churn cannot continuously repaint the desktop panel.
+Desktop cost is part of the resource gate: measure GNOME Shell with the indicator
+and dashboard present and absent, not just the application process's CPU. The
+2026-09-08 short samples found sustained shell load even with these components
+absent; they do not prove zero incremental UI cost or identify the shell's cause.
+The full indexed file/conflict/action UI remains future work.
 
 Embed templates and all necessary CSS/JS with `go:embed`; use simple Go templates and
 minimal JavaScript (vendored htmx if useful). **No runtime CDN, web fonts, analytics or
@@ -471,7 +914,8 @@ implemented field; distinguish defaults from effective limits.
 - [ ] **M2 — LAN safety and NAS feasibility:** local SMB mount/route diagnostics and
   kernel-CIFS discovery are implemented; GVFS compatibility paths remain test-only.
   The prepared QNAP mount passed the bounded client-side read/write probe, but
-  CIFS counters also provide strong, not packet-proven, server-copy evidence.
+  A later bounded packet capture and CIFS counters validate one small same-share
+  server-copy operation; larger and arbitrary-range workloads remain pending.
   automatic writes remain disabled. Implement the enforced policy gate **before any
   automatic write**. Measure offload, durability, cross-protocol coordination and
   failure recovery on the real QNAP. Record the native/helper decision and supported

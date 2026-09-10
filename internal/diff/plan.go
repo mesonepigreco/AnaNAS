@@ -49,6 +49,7 @@ type Manifest struct {
 	Size      int64
 	Blocks    []Block
 	Tombstone bool
+	Directory bool
 }
 
 // Decision is the pure result of comparing a local and remote head with their
@@ -84,7 +85,7 @@ func Plan(base, local, remote *Manifest) Decision {
 // remotely, once and in manifest order. It is intentionally a pure helper: the
 // caller must obtain the availability set from a verified transport operation.
 func MissingBlocks(local *Manifest, remoteHave map[hash.Digest]struct{}) []Block {
-	if local == nil || local.Tombstone {
+	if local == nil || local.Tombstone || local.Directory {
 		return nil
 	}
 	missing := make([]Block, 0, len(local.Blocks))
@@ -118,8 +119,11 @@ func (m *Manifest) Validate(maxBlocks int) error {
 	if len(m.Blocks) > maxBlocks {
 		return fmt.Errorf("manifest has %d blocks; maximum is %d", len(m.Blocks), maxBlocks)
 	}
-	if m.Tombstone && (m.Size != 0 || len(m.Blocks) != 0) {
-		return fmt.Errorf("tombstone cannot contain content")
+	if m.Tombstone && m.Directory {
+		return fmt.Errorf("manifest cannot be both directory and tombstone")
+	}
+	if (m.Tombstone || m.Directory) && (m.Size != 0 || len(m.Blocks) != 0) {
+		return fmt.Errorf("directory or tombstone cannot contain content")
 	}
 	var total int64
 	for i, block := range m.Blocks {
@@ -153,6 +157,9 @@ func sameContent(a, b *Manifest) bool {
 	}
 	if a.Tombstone || b.Tombstone {
 		return a.Tombstone && b.Tombstone
+	}
+	if a.Directory || b.Directory {
+		return a.Directory && b.Directory
 	}
 	if a.Size != b.Size || len(a.Blocks) != len(b.Blocks) {
 		return false

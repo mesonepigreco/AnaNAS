@@ -37,22 +37,46 @@ type Status struct {
 }
 
 type Observer struct {
-	cfg     *config.Config
-	root    *os.Root
-	watcher *fsnotify.Watcher
-	matcher *exclude.Matcher
-	db      *index.DB
-	watched map[string]index.Fingerprint // scanner goroutine owns this map
-	mu      sync.RWMutex
-	status  Status
-	events  atomic.Uint64
-	nextIO  time.Time
+	cfg        *config.Config
+	root       *os.Root
+	watcher    *fsnotify.Watcher
+	matcher    *exclude.Matcher
+	db         *index.DB
+	watched    map[string]index.Fingerprint // scanner goroutine owns this map
+	mu         sync.RWMutex
+	status     Status
+	changes    chan struct{}
+	reconciled chan struct{}
+	events     atomic.Uint64
+	nextIO     time.Time
 }
 
 func New(cfg *config.Config, db *index.DB) (*Observer, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
+	return newObserver(cfg, db)
+}
+
+// NewNative observes a NAS-native root already pinned by the helper publisher.
+// It has no remote mount configuration and performs metadata work only. Defaults
+// are 50 metadata operations/s, 8192 watches and 1.5–5 second coalescing.
+func NewNative(root string, patterns []string, db *index.DB) (*Observer, error) {
+	if !filepath.IsAbs(root) || filepath.Clean(root) != root || root == "/" || db == nil {
+		return nil, fmt.Errorf("canonical native root and index required")
+	}
+	cfg := config.Default()
+	cfg.Local.Root = root
+	cfg.Selective.ExcludeLocal = append([]string(nil), patterns...)
+	cfg.Limits.MaxWatches = 8192
+	o, err := newObserver(cfg, db)
+	if err == nil {
+		o.status.Mode = "native NAS metadata observation"
+	}
+	return o, err
+}
+
+func newObserver(cfg *config.Config, db *index.DB) (*Observer, error) {
 	root, err := os.OpenRoot(cfg.Local.Root)
 	if err != nil {
 		return nil, err
@@ -69,7 +93,7 @@ func New(cfg *config.Config, db *index.DB) (*Observer, error) {
 		root.Close()
 		return nil, err
 	}
-	return &Observer{cfg: cfg, root: root, watcher: w, matcher: m, db: db, watched: map[string]index.Fingerprint{}, status: Status{Mode: "local observation; NAS synchronization not enabled", Root: cfg.Local.Root}}, nil
+	return &Observer{cfg: cfg, root: root, watcher: w, matcher: m, db: db, watched: map[string]index.Fingerprint{}, changes: make(chan struct{}, 1), reconciled: make(chan struct{}, 1), status: Status{Mode: "local observation; NAS synchronization not enabled", Root: cfg.Local.Root}}, nil
 }
 func (o *Observer) Status() Status {
 	o.mu.RLock()
@@ -78,7 +102,29 @@ func (o *Observer) Status() Status {
 	s.Events = o.events.Load()
 	return s
 }
-func (o *Observer) set(f func(*Status)) { o.mu.Lock(); defer o.mu.Unlock(); f(&o.status) }
+
+// Changes is a bounded hint to refresh status, never a queue of file events.
+func (o *Observer) Changes() <-chan struct{} { return o.changes }
+
+// Reconciled hints that a successful metadata batch is durable. It is separate
+// from UI status changes so a transfer worker never wakes once per scanned file.
+// The durable dirty index, not this coalesced hint, is the source of pending work.
+func (o *Observer) Reconciled() <-chan struct{} { return o.reconciled }
+func (o *Observer) notifyReconciled() {
+	select {
+	case o.reconciled <- struct{}{}:
+	default:
+	}
+}
+func (o *Observer) set(f func(*Status)) {
+	o.mu.Lock()
+	f(&o.status)
+	o.mu.Unlock()
+	select {
+	case o.changes <- struct{}{}:
+	default:
+	}
+}
 
 // Run always reconciles at startup, covering events missed while stopped. A
 // persistent recovery marker is set for the entire running session and only
@@ -102,6 +148,7 @@ func (o *Observer) Run(ctx context.Context) error {
 		return o.fail(err)
 	}
 	o.set(func(s *Status) { s.Ready = true })
+	o.notifyReconciled()
 	log.Print("local index ready; watching for changes")
 	for {
 		select {
@@ -123,11 +170,13 @@ func (o *Observer) Run(ctx context.Context) error {
 				if err := o.scan(ctx, ".", false); err != nil {
 					return o.fail(err)
 				}
+				o.notifyReconciled()
 				continue
 			}
 			if err := o.scanBatch(ctx, b.Paths, true); err != nil {
 				return o.fail(err)
 			}
+			o.notifyReconciled()
 		}
 	}
 }
@@ -372,7 +421,12 @@ func (o *Observer) scanBatch(ctx context.Context, paths []string, force bool) er
 		if len(missingUpdates) == 0 {
 			return nil
 		}
-		err := o.db.Put(missingUpdates, false)
+		// Reconfirm absence even if the previous index record was already
+		// missing: a create/delete pair can coalesce away while a journal head
+		// advances independently. Restart reconciliation must cover the same
+		// window. This runs only after a complete requested metadata scan;
+		// it adds no polling or filesystem reads.
+		err := o.db.Put(missingUpdates, true)
 		missingUpdates = missingUpdates[:0]
 		return err
 	}

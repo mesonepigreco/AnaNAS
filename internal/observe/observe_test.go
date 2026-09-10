@@ -274,3 +274,52 @@ func TestUnavailableRootCannotDeleteIndexedFiles(t *testing.T) {
 		t.Fatal("unavailable root caused deletion")
 	}
 }
+
+func TestReconfirmedAbsenceRefreshesMissingGeneration(t *testing.T) {
+	cfg, db := setup(t)
+	name := filepath.Join(cfg.Local.Root, "file")
+	write(t, name, "original")
+	o, err := New(cfg, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer o.root.Close()
+	defer o.watcher.Close()
+	if err := o.scan(context.Background(), ".", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(name); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.scan(context.Background(), "file", true); err != nil {
+		t.Fatal(err)
+	}
+	before, _, _ := db.Get("file")
+	if ok, err := db.ClearObserved(before); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	// Another writer can publish and remove a file within one coalescing
+	// window (or while the observer is stopped). A prior acknowledged absence
+	// must not hide the new deletion from the transfer worker.
+	for _, force := range []bool{true, false} {
+		write(t, name, "intervening version")
+		if err := os.Remove(name); err != nil {
+			t.Fatal(err)
+		}
+		root := "file"
+		if !force {
+			root = "." // restart scan
+		}
+		if err := o.scan(context.Background(), root, force); err != nil {
+			t.Fatal(err)
+		}
+		after, _, _ := db.Get("file")
+		if !after.Missing || !after.Dirty || after.Generation <= before.Generation {
+			t.Fatal("coalesced deletion lost", before, after)
+		}
+		if ok, err := db.ClearObserved(after); err != nil || !ok {
+			t.Fatal(ok, err)
+		}
+		before = after
+	}
+}

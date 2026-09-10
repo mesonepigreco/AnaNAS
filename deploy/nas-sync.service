@@ -1,5 +1,5 @@
 [Unit]
-Description=Lightweight NAS sync local observer
+Description=anaNAS folder synchronization
 
 [Service]
 ExecStart=%h/.local/bin/nas-sync -config %h/.config/nas-sync/config.json

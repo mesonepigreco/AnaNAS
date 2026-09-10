@@ -125,6 +125,7 @@ type Limits struct {
 
 // Config is the effective, fully-defaulted configuration.
 type Config struct {
+	Sync Sync `json:"sync"`
 	// LANGuard enforces that automatic sync only ever touches a LAN mount.
 	LANGuard bool   `json:"lanGuard"`
 	StateDir string `json:"stateDir"`
@@ -132,7 +133,7 @@ type Config struct {
 	// ScanRemote is how often out-of-band remote changes are probed in LAN mode.
 	ScanRemote Duration `json:"scanRemote"`
 	BlockSize  int      `json:"blockSize"`
-	// WebPort is the loopback-only status UI port. Zero disables the UI.
+	// WebPort is the loopback-only status/control UI port. Zero disables the UI.
 	WebPort   int           `json:"webPort"`
 	NAS       NAS           `json:"nas"`
 	Remote    Remote        `json:"remote"`
@@ -301,7 +302,7 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("nas.protocol must be smb or nfs")
 	}
-	return nil
+	return c.Sync.validate(c)
 }
 
 // Print writes the effective configuration as indented JSON.
