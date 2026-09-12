@@ -46,9 +46,9 @@ func TestLoadOverlay(t *testing.T) {
 	path := filepath.Join(dir, "config.json")
 	content := `{
 	  "local":  {"root": "/home/me/docs"},
-	  "nas":    {"host": "192.168.1.50", "share": "nas-sync", "mountPoint": "/mnt/nas-sync"},
+	  "nas":    {"host": "10.23.42.50", "share": "nas-sync", "mountPoint": "/mnt/nas-sync"},
 	  "remote": {"enabled": true, "host": "nas.example.com", "port": 22,
-	             "user": "darth", "keyFile": "/home/me/.ssh/id_ed25519",
+	             "user": "example-user", "keyFile": "/home/me/.ssh/id_ed25519",
 	             "knownHosts": "/home/me/.ssh/known_hosts"},
 	  "coalesce": {"idle": "500ms", "maxWait": "3s"},
 	  "selectiveSync": {"excludeLocal": ["node_modules/", "*.tmp"],
@@ -64,10 +64,10 @@ func TestLoadOverlay(t *testing.T) {
 	if cfg.Local.Root != "/home/me/docs" {
 		t.Fatalf("overlay failed on local.root: %q", cfg.Local.Root)
 	}
-	if cfg.NAS.Host != "192.168.1.50" || cfg.NAS.MountPoint != "/mnt/nas-sync" {
+	if cfg.NAS.Host != "10.23.42.50" || cfg.NAS.MountPoint != "/mnt/nas-sync" {
 		t.Fatalf("overlay failed on nas: %+v", cfg.NAS)
 	}
-	if !cfg.Remote.Enabled || cfg.Remote.User != "darth" || cfg.Remote.Port != 22 {
+	if !cfg.Remote.Enabled || cfg.Remote.User != "example-user" || cfg.Remote.Port != 22 {
 		t.Fatalf("overlay failed on remote: %+v", cfg.Remote)
 	}
 	if cfg.Coalesce.Idle.Std() != 500*time.Millisecond || cfg.Coalesce.MaxWait.Std() != 3*time.Second {

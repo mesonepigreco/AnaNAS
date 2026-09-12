@@ -1,0 +1,11 @@
+[Unit]
+Description=anaNAS dedicated LAN endpoint restriction
+Before=systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/nft -f /etc/ananas-network.nft
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,7 @@
+#!/bin/sh
+# NetworkManager invokes this on state changes; there is no polling timer.
+case "$1:$2" in
+  enp1s0:up|enp1s0:dhcp4-change|enp1s0:reapply)
+    /usr/bin/systemctl --no-block start ananas-mount.service
+    ;;
+esac

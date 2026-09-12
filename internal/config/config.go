@@ -160,7 +160,7 @@ func Default() *Config {
 		ScanRemote: Duration(15 * time.Minute),
 		BlockSize:  64 * 1024, // 64 KiB content blocks (BLAKE3 digests)
 		WebPort:    0,
-		Limits:     Limits{ReadBytesPerSecond: 20 << 20, ScanOpsPerSecond: 50, MaxWatches: 100000, CacheBytes: 1 << 30},
+		Limits:     Limits{ReadBytesPerSecond: 20 << 20, ScanOpsPerSecond: 10000, MaxWatches: 100000, CacheBytes: 1 << 30},
 		NAS: NAS{
 			Protocol: "smb",
 		},

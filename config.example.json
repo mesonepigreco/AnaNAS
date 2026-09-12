@@ -4,18 +4,18 @@
     "root": "/home/me/Documents/sync"
   },
   "nas": {
-    "host": "192.168.1.50",
+    "host": "10.23.42.50",
     "share": "nas-sync",
     "mountPoint": "/mnt/nas-sync",
     "protocol": "smb",
     "interface": "enp3s0",
-    "prefix": "192.168.1.0/24"
+    "prefix": "10.23.42.0/24"
   },
   "remote": {
     "enabled": false,
     "host": "nas.example.com",
     "port": 22,
-    "user": "darth",
+    "user": "example-user",
     "keyFile": "/home/me/.ssh/id_ed25519",
     "knownHosts": "/home/me/.ssh/known_hosts"
   },
@@ -38,7 +38,7 @@
   "webPort": 8721,
   "limits": {
     "readBytesPerSecond": 20971520,
-    "scanOpsPerSecond": 50,
+    "scanOpsPerSecond": 10000,
     "maxWatches": 100000,
     "cacheBytes": 1073741824
   },

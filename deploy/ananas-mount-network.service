@@ -1,0 +1,11 @@
+[Unit]
+Description=anaNAS SMB endpoint restricted to physical LAN
+Before=ananas-mount.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/nft -f /etc/ananas-mount-network.nft
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

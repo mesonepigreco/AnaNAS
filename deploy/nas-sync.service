@@ -3,13 +3,14 @@ Description=anaNAS folder synchronization
 
 [Service]
 ExecStart=%h/.local/bin/nas-sync -config %h/.config/nas-sync/config.json
+Environment=ANANAS_CPU_GOVERNOR=1
 Restart=on-failure
 RestartSec=30
 Nice=10
 IOSchedulingClass=idle
-# This caps the whole process to 10% of one CPU, including foreground work.
-# Remove/override only after measuring on the deployment machine.
-CPUQuota=10%
+# Each scan/transfer task starts at one core, decays to 50% after 30 seconds and
+# 10% after 60 seconds, then returns to 10% as soon as the task finishes.
+CPUQuota=100%
 MemoryHigh=128M
 MemoryMax=256M
 UMask=0077

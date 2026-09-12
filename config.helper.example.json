@@ -1,0 +1,27 @@
+{
+  "liveWrites": false,
+  "observerStateDir": "",
+  "root": "/share/EXAMPLE_VOLUME/ananas-example/root",
+  "stateDir": "/share/EXAMPLE_VOLUME/ananas-example/state",
+  "namespace": "1111111111111111111111111111111111111111111111111111111111111111",
+  "listen": "10.23.42.30:8742",
+  "interface": "eth0",
+  "prefix": "10.23.42.0/24",
+  "peers": ["10.23.42.17"],
+  "uid": 1000,
+  "gid": 100,
+  "groups": [100],
+  "certificate": "/share/EXAMPLE_VOLUME/ananas-example/server.pem",
+  "privateKey": "/share/EXAMPLE_VOLUME/ananas-example/server.key",
+  "clientCA": "/share/EXAMPLE_VOLUME/ananas-example/ca.pem",
+  "clients": {
+    "2222222222222222222222222222222222222222222222222222222222222222": "3333333333333333333333333333333333333333333333333333333333333333"
+  },
+  "exclusions": [],
+  "maxConnections": 2,
+  "maxFileBytes": 1048576,
+  "maxBatchBytes": 2097152,
+  "maxCacheBytes": 33554432,
+  "maxCacheEntries": 128,
+  "readBytesPerSecond": 2097152
+}

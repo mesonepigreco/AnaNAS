@@ -28,7 +28,7 @@ func TestResourceAndRootValidation(t *testing.T) {
 		func(c *Config) { c.BlockSize = 1 << 30 }, func(c *Config) { c.Coalesce.MaxPending = 0 },
 		func(c *Config) { c.Coalesce.MaxBytes = 1 }, func(c *Config) { c.Limits.ScanOpsPerSecond = 0 },
 		func(c *Config) { c.Local.Root = "relative" }, func(c *Config) { c.NAS.MountPoint = "/tmp/local/child" },
-		func(c *Config) { c.StateDir = "/tmp/local/state" }, func(c *Config) { c.NAS.Prefix = "192.168.1.0/24"; c.NAS.Host = "10.0.0.1" },
+		func(c *Config) { c.StateDir = "/tmp/local/state" }, func(c *Config) { c.NAS.Prefix = "10.23.42.0/24"; c.NAS.Host = "10.0.0.1" },
 	} {
 		c := Default()
 		c.Local.Root = "/tmp/local"

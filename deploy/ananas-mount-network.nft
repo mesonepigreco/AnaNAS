@@ -1,0 +1,7 @@
+table inet ananas_mount {
+    chain output {
+        type filter hook output priority -11; policy accept;
+        ip daddr 10.23.42.30 tcp dport 445 oifname "enp1s0" accept
+        ip daddr 10.23.42.30 tcp dport 445 reject
+    }
+}

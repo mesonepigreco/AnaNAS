@@ -1,0 +1,38 @@
+{
+  "local": {
+    "root": "/home/example-user/NASdir"
+  },
+  "nas": {
+    "host": "10.23.42.30",
+    "share": "Nasdir",
+    "mountPoint": "/mnt/nasdir",
+    "protocol": "smb",
+    "interface": "enp1s0",
+    "prefix": "10.23.42.0/24"
+  },
+  "remote": {
+    "enabled": false,
+    "port": 22
+  },
+  "coalesce": {
+    "idle": "1.5s",
+    "maxWait": "5s",
+    "maxPending": 10000,
+    "maxBytes": 4194304
+  },
+  "selectiveSync": {
+    "excludeLocal": [],
+    "excludeRemote": ["/@Recycle/"]
+  },
+  "lanGuard": true,
+  "scanRemote": "15m",
+  "blockSize": 65536,
+  "webPort": 8721,
+  "limits": {
+    "readBytesPerSecond": 1073741824,
+    "scanOpsPerSecond": 10000,
+    "maxWatches": 100000,
+    "cacheBytes": 1099511627776
+  },
+  "stateDir": "/home/example-user/.local/state/nas-sync/nasdir"
+}

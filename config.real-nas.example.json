@@ -3,12 +3,12 @@
     "root": "/tmp/nas-sync-real-nas-local"
   },
   "nas": {
-    "host": "192.168.1.30",
+    "host": "10.23.42.30",
     "share": "nas-sync-test",
     "mountPoint": "/mnt/nas-sync-test",
     "protocol": "smb",
-    "interface": "eno1",
-    "prefix": "192.168.1.0/24"
+    "interface": "enp1s0",
+    "prefix": "10.23.42.0/24"
   },
   "remote": {
     "enabled": false,
@@ -30,9 +30,9 @@
   "webPort": 8721,
   "limits": {
     "readBytesPerSecond": 20971520,
-    "scanOpsPerSecond": 50,
+    "scanOpsPerSecond": 10000,
     "maxWatches": 100000,
-    "cacheBytes": 1073741824
+    "cacheBytes": 1099511627776
   },
   "stateDir": "/tmp/nas-sync-real-nas-state"
 }

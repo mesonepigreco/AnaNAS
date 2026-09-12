@@ -1,0 +1,18 @@
+[Unit]
+Description=anaNAS automatic direct-LAN Nasdir mount
+Wants=network-online.target
+After=network-online.target ananas-mount-network.service
+Requires=ananas-mount-network.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecCondition=/usr/local/libexec/ananas-mount --check-lan
+ExecStart=/usr/local/libexec/ananas-mount --mount
+TimeoutStartSec=40
+Restart=on-failure
+RestartSec=60
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

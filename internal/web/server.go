@@ -48,6 +48,14 @@ func New(port int, snapshot Snapshot) (*Server, error) {
 }
 
 func NewWithControl(port int, snapshot Snapshot, pause PauseControl) (*Server, error) {
+	return NewWithDetails(port, snapshot, pause, nil)
+}
+
+// Details is requested explicitly by a visible control panel, never by the
+// lightweight status stream. Providers must honor cancellation and bound work.
+type Details func(context.Context, string) (any, error)
+
+func NewWithDetails(port int, snapshot Snapshot, pause PauseControl, details Details) (*Server, error) {
 	if port < 0 || port > 65535 {
 		return nil, fmt.Errorf("web port out of range")
 	}
@@ -68,6 +76,27 @@ func NewWithControl(port int, snapshot Snapshot, pause PauseControl) (*Server, e
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", indexHandler(token, pause != nil))
 	mux.HandleFunc("/api/status", statusHandler(snapshot))
+	if details != nil {
+		mux.HandleFunc("/api/storage", func(w http.ResponseWriter, r *http.Request) {
+			if !methodAllowed(w, r) {
+				return
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Nas-Sync-CSRF")), []byte(token)) != 1 {
+				http.Error(w, "invalid control token", http.StatusForbidden)
+				return
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+			defer cancel()
+			value, err := details(ctx, r.URL.Query().Get("path"))
+			if err != nil {
+				http.Error(w, "Folder sizes could not be loaded. Please refresh.", http.StatusServiceUnavailable)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(value)
+		})
+	}
 	mux.HandleFunc("/icon.svg", func(w http.ResponseWriter, r *http.Request) {
 		if !methodAllowed(w, r) {
 			return

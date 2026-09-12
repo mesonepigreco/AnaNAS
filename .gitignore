@@ -11,6 +11,10 @@ AGENTS.md
 coverage.*
 vendor/
 
+# Python bytecode
+__pycache__/
+*.py[cod]
+
 # Local runtime state (index DB, caches, config with secrets)
 /.nas-sync/
 *.db
@@ -18,6 +22,18 @@ vendor/
 /data/
 config.local.*
 *.secret
+*.cred
+*.pem
+*.key
+*.p12
+*.pfx
+.env
+.env.*
+!.env.example
+
+# Raw production evidence is private; publish only reviewed summaries.
+/docs/evidence/*
+!/docs/evidence/README.md
 
 # Editor/OS noise
 .DS_Store

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=anaNAS
+Comment=Sync activity, transfer history and NAS storage
+Exec=nas-sync-indicator --control-panel
+Icon=ananas
+Terminal=false
+Categories=Utility;
+Keywords=NAS;sync;pineapple;
+StartupNotify=false

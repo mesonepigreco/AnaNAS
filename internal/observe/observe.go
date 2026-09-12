@@ -49,6 +49,7 @@ type Observer struct {
 	reconciled chan struct{}
 	events     atomic.Uint64
 	nextIO     time.Time
+	task       func() func()
 }
 
 func New(cfg *config.Config, db *index.DB) (*Observer, error) {
@@ -69,6 +70,7 @@ func NewNative(root string, patterns []string, db *index.DB) (*Observer, error) 
 	cfg.Local.Root = root
 	cfg.Selective.ExcludeLocal = append([]string(nil), patterns...)
 	cfg.Limits.MaxWatches = 8192
+	cfg.Limits.ScanOpsPerSecond = 50
 	o, err := newObserver(cfg, db)
 	if err == nil {
 		o.status.Mode = "native NAS metadata observation"
@@ -109,7 +111,8 @@ func (o *Observer) Changes() <-chan struct{} { return o.changes }
 // Reconciled hints that a successful metadata batch is durable. It is separate
 // from UI status changes so a transfer worker never wakes once per scanned file.
 // The durable dirty index, not this coalesced hint, is the source of pending work.
-func (o *Observer) Reconciled() <-chan struct{} { return o.reconciled }
+func (o *Observer) Reconciled() <-chan struct{}    { return o.reconciled }
+func (o *Observer) SetTaskHook(task func() func()) { o.task = task }
 func (o *Observer) notifyReconciled() {
 	select {
 	case o.reconciled <- struct{}{}:
@@ -252,6 +255,10 @@ func (o *Observer) scan(ctx context.Context, rel string, force bool) error {
 	return o.scanBatch(ctx, []string{rel}, force)
 }
 func (o *Observer) scanBatch(ctx context.Context, paths []string, force bool) error {
+	if o.task != nil {
+		end := o.task()
+		defer end()
+	}
 	// Coalescer paths are sorted. Collapse covered descendants without allocating
 	// an additional tree or scanning a new directory once for every child event.
 	roots := make([]string, 0, len(paths))

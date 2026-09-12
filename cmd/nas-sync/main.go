@@ -12,11 +12,13 @@ import (
 	"fmt"
 	"log"
 	"nas-sync/internal/control"
+	"nas-sync/internal/cpugovernor"
 	"nas-sync/internal/daemon"
 	"nas-sync/internal/hash"
 	"nas-sync/internal/index"
 	"nas-sync/internal/languard"
 	"nas-sync/internal/observe"
+	"nas-sync/internal/traffic"
 	"nas-sync/internal/web"
 	"os"
 	"os/signal"
@@ -26,6 +28,13 @@ import (
 )
 
 var version = "0.0.0-dev"
+
+func cpuPercent(governor *cpugovernor.Governor) int64 {
+	if governor == nil {
+		return 0
+	}
+	return governor.Percent()
+}
 
 func main() {
 	cfgPath := flag.String("config", config.DefaultPath(), "path to the configuration file")
@@ -175,15 +184,35 @@ func runApplication(ctx context.Context, cfg *config.Config, once, identity bool
 	if err != nil {
 		return err
 	}
+	var governor *cpugovernor.Governor
+	var task func() func()
+	if os.Getenv("ANANAS_CPU_GOVERNOR") == "1" {
+		governor, err = cpugovernor.Open()
+		if err != nil {
+			return fmt.Errorf("start CPU task governor: %w", err)
+		}
+		defer governor.Close()
+		task = governor.Begin
+		observer.SetTaskHook(task)
+	}
 	if once {
 		if err := observer.ScanOnce(ctx); err != nil {
 			return err
 		}
 		return json.NewEncoder(os.Stdout).Encode(observer.Status())
 	}
+	trafficHistory, err := traffic.Open(filepath.Join(resolved, "traffic.db"))
+	if err != nil {
+		return fmt.Errorf("open traffic history: %w", err)
+	}
+	defer func() {
+		if err := trafficHistory.Close(); err != nil {
+			log.Printf("save traffic history: %v", err)
+		}
+	}()
 	var live *syncRuntime
 	if cfg.Sync.Enabled {
-		live, err = openSync(&effective, resolved, db, observer)
+		live, err = openSync(&effective, resolved, db, observer, task, trafficHistory.Add)
 		if err != nil {
 			return fmt.Errorf("start LAN sync: %w", err)
 		}
@@ -205,27 +234,36 @@ func runApplication(ctx context.Context, cfg *config.Config, once, identity bool
 		}
 		return err
 	}
-	statusServer, err := web.NewWithControl(cfg.WebPort, func() any {
+	storage := &storageView{cfg: cfg.NAS, db: db}
+	statusServer, err := web.NewWithDetails(cfg.WebPort, func() any {
 		status := observer.Status()
 		reason := "NAS transfers disabled: synchronization engine and safety validation are incomplete."
 		var uploaded, downloaded uint64
+		activity, activityErr := db.Activity(time.Now())
 		if live != nil {
 			status.Mode = "native LAN synchronization — live trial"
-			reason = live.reason()
+			reason = live.reason(status)
 			traffic := live.client.Traffic()
 			uploaded, downloaded = traffic.Sent, traffic.Received
 		}
+		if activityErr != nil {
+			reason = "Local activity history error: " + activityErr.Error()
+		}
 		return struct {
 			observe.Status
-			Paused          bool          `json:"paused"`
-			AutomaticWrites bool          `json:"automaticWrites"`
-			SyncReason      string        `json:"syncReason"`
-			UploadBytes     uint64        `json:"uploadBytes"`
-			DownloadBytes   uint64        `json:"downloadBytes"`
-			NAS             config.NAS    `json:"nas"`
-			Limits          config.Limits `json:"limits"`
-		}{Status: status, Paused: controls.Paused(), AutomaticWrites: live != nil, SyncReason: reason, UploadBytes: uploaded, DownloadBytes: downloaded, NAS: cfg.NAS, Limits: cfg.Limits}
-	}, controls.SetPaused)
+			Paused          bool                 `json:"paused"`
+			AutomaticWrites bool                 `json:"automaticWrites"`
+			SyncReason      string               `json:"syncReason"`
+			UploadBytes     uint64               `json:"uploadBytes"`
+			DownloadBytes   uint64               `json:"downloadBytes"`
+			Updated24Hours  uint64               `json:"updatedLast24Hours"`
+			RecentUpdates   []index.RecentUpdate `json:"recentUpdates"`
+			CPULimitPercent int64                `json:"cpuLimitPercent,omitempty"`
+			NAS             config.NAS           `json:"nas"`
+			Limits          config.Limits        `json:"limits"`
+			Traffic         traffic.Summary      `json:"traffic"`
+		}{Status: status, Paused: controls.Paused(), AutomaticWrites: live != nil, SyncReason: reason, UploadBytes: uploaded, DownloadBytes: downloaded, Updated24Hours: activity.UpdatedLast24Hours, RecentUpdates: activity.Recent, CPULimitPercent: cpuPercent(governor), NAS: cfg.NAS, Limits: cfg.Limits, Traffic: trafficHistory.Summary(time.Now())}
+	}, controls.SetPaused, storage.snapshot)
 	if err != nil {
 		return fmt.Errorf("start local status UI: %w", err)
 	}
