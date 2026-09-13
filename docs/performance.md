@@ -15,6 +15,12 @@ system; it does not claim sustained throughput or universal idle-resource result
   separate process memory and scheduling limits.
 - LAN policy uses interface, address, route and mount evidence. Healthy idle does
   not require recursive NAS polling; failure paths have bounded retries.
+- Source failures are stored against their observed generation. Blocked files
+  are skipped before hashing; changing or explicitly confirming a file allows
+  another attempt. Transient issues clear at the next bounded retry pass. Pending
+  UI pages remain capped at 200; no whole-file buffering was added by isolation.
+  The reliability fault tests establish recovery behavior, not sustained throughput
+  or a new memory bound for multi-gigabyte production transfers.
 
 ## Desktop and setup
 

@@ -2,12 +2,18 @@
 import datetime
 import hashlib
 import queue
+import re
 import threading
 import time
 
 import gi
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, Gdk, Gio, GLib
+from gi.repository import Gtk, Gdk, Gio, GLib, Pango
+
+
+def internal_trial_path(path):
+    root = path.split('/', 1)[0]
+    return root == '.ananas-tests' or path == 'anaNAS-live-check.bin' or re.fullmatch(r'anaNAS-(deletions|folders)-[a-f0-9]{12}', root) is not None
 
 
 def size(value):
@@ -79,6 +85,14 @@ class Panel(Gtk.Application):
         self.pending_scheduled = False
         self.generation = 0
         self.age_timer = 0
+
+        self.pending_loading = False
+        self.confirming = False
+        self.pending_after = ""
+        self.pending_next = ""
+        self.pending_total = 0
+        self.pending_valid = False
+        self.pending_refresh_timer = 0
         self.connect("activate", self.activate_panel)
 
     def label(self, text="", style=None):
@@ -122,11 +136,18 @@ class Panel(Gtk.Application):
 
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         page.get_style_context().add_class("page")
-        self.window.add(page)
+        page_scroll = Gtk.ScrolledWindow()
+        page_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        page_scroll.add(page)
+        self.window.add(page_scroll)
         self.headline = self.label("Connecting to anaNAS…", "hero")
-        self.headline.set_ellipsize(3)
-        self.headline.set_max_width_chars(65)
         page.pack_start(self.headline, False, False, 0)
+        self.status_details = self.label("", "muted")
+        self.status_details.set_line_wrap(True)
+        self.status_details.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self.status_details.set_max_width_chars(90)
+        self.status_details.set_selectable(True)
+        page.pack_start(self.status_details, False, False, 0)
         self.location = self.label(str(self.root), "muted")
         page.pack_start(self.location, False, False, 0)
         self.message = self.label("", "problem")
@@ -147,6 +168,7 @@ class Panel(Gtk.Application):
         nas.pack_start(self.capacity_note, False, False, 0)
 
         notebook = Gtk.Notebook()
+        self.notebook = notebook
         page.pack_start(notebook, True, True, 0)
         folders = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=14)
         notebook.append_page(folders, Gtk.Label(label="Folder sizes"))
@@ -163,7 +185,7 @@ class Panel(Gtk.Application):
         self.tree = Gtk.TreeView(model=self.model)
         self.tree.set_enable_tree_lines(True)
         self.tree.set_tooltip_column(5)
-        for column, title in enumerate(("Folder", "On this computer", "Last synced to NAS", "Files")):
+        for column, title in enumerate(("Folder", "On this computer", "Synced to NAS (files)", "Files")):
             cell = Gtk.CellRendererText()
             if column == 0:
                 cell.set_property("ellipsize", 3)
@@ -185,6 +207,52 @@ class Panel(Gtk.Application):
         foot = self.label("Totals include hidden files. Logical sizes come from the index; NAS volume usage includes other shares, history and the recycle bin.", "muted")
         foot.set_line_wrap(True)
         folders.pack_start(foot, False, False, 0)
+
+        self.pending_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=14)
+        notebook.append_page(self.pending_page, Gtk.Label(label="Pending files"))
+        self.pending_summary = self.label("Refresh to load pending files", "section")
+        self.pending_page.pack_start(self.pending_summary, False, False, 0)
+        pending_note = self.label("Double-click to open the containing folder · Right-click for folder and terminal actions\nAutomatic sync stays enabled. Confirm gives files priority after the current transfer. Pause settings and conflicts still apply.", "muted")
+        pending_note.set_line_wrap(True)
+        self.pending_page.pack_start(pending_note, False, False, 0)
+        self.pending_model = Gtk.ListStore(str, str, str, str, bool, str)
+        self.pending_view = Gtk.TreeView(model=self.pending_model)
+        self.pending_view.set_tooltip_column(0)
+        for i, title in enumerate(("File or folder", "Size", "Operation", "Status")):
+            cell = Gtk.CellRendererText()
+            if i == 0:
+                cell.set_property("ellipsize", 3)
+            col = Gtk.TreeViewColumn(title, cell, text=i)
+            col.set_expand(i == 0)
+            col.set_resizable(True)
+            self.pending_view.append_column(col)
+        self.pending_view.get_selection().connect("changed", lambda _: self.pending_buttons())
+        self.pending_view.connect("row-activated", self.activate_pending)
+        self.pending_view.connect("button-press-event", self.pending_button_press)
+        self.pending_view.connect("popup-menu", self.pending_keyboard_menu)
+        pending_scroll = Gtk.ScrolledWindow()
+        pending_scroll.set_min_content_height(180)
+        pending_scroll.add(self.pending_view)
+        self.pending_page.pack_start(pending_scroll, True, True, 0)
+        actions = Gtk.Box(spacing=10)
+        self.confirm_one = Gtk.Button(label="Confirm sync")
+        self.confirm_one.connect("clicked", lambda _: self.confirm_pending(False))
+        actions.pack_start(self.confirm_one, False, False, 0)
+        self.confirm_all = Gtk.Button(label="Confirm all")
+        self.confirm_all.connect("clicked", lambda _: self.confirm_pending(True))
+        actions.pack_start(self.confirm_all, False, False, 0)
+        self.pending_first = Gtk.Button(label="First page")
+        self.pending_first.connect("clicked", lambda _: self.load_pending(""))
+        actions.pack_end(self.pending_first, False, False, 0)
+        self.pending_more = Gtk.Button(label="Next page")
+        self.pending_more.connect("clicked", lambda _: self.load_pending(self.pending_next))
+        actions.pack_end(self.pending_more, False, False, 0)
+        self.pending_page.pack_start(actions, False, False, 0)
+        self.pending_result = self.label("", "muted")
+        self.pending_result.set_line_wrap(True)
+        self.pending_page.pack_start(self.pending_result, False, False, 0)
+        notebook.connect("switch-page", lambda _n, child, _i: self.load_pending("") if child == self.pending_page else None)
+        self.pending_buttons()
 
         recent = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=14)
         notebook.append_page(recent, Gtk.Label(label="Recent activity"))
@@ -221,6 +289,9 @@ class Panel(Gtk.Application):
 
     def hide(self, *_):
         self.window.hide()
+        if self.pending_refresh_timer:
+            GLib.source_remove(self.pending_refresh_timer)
+            self.pending_refresh_timer = 0
         if self.age_timer:
             GLib.source_remove(self.age_timer)
             self.age_timer = 0
@@ -228,6 +299,8 @@ class Panel(Gtk.Application):
 
     def refresh_age(self):
         self.submit(self.client.status, lambda state, error: self.render(state, error))
+        if self.notebook.get_nth_page(self.notebook.get_current_page()) == self.pending_page:
+            self.load_pending(self.pending_after)
         return True
 
     def submit(self, work, done):
@@ -261,20 +334,50 @@ class Panel(Gtk.Application):
             state, error = self.pending
             self.pending_scheduled = False
         self.render(state, error)
+        self.schedule_pending_refresh()
         return False
+
+    def schedule_pending_refresh(self):
+        if self.pending_refresh_timer or not self.window.get_visible():
+            return
+        if self.notebook.get_nth_page(self.notebook.get_current_page()) != self.pending_page:
+            return
+        def refresh():
+            self.pending_refresh_timer = 0
+            if not self.window.get_visible() or self.notebook.get_nth_page(self.notebook.get_current_page()) != self.pending_page:
+                return False
+            if self.pending_loading or self.confirming:
+                self.schedule_pending_refresh()
+            else:
+                self.load_pending(self.pending_after)
+            return False
+        # Coalesce bursts of file/worker notifications without polling hidden tabs.
+        self.pending_refresh_timer = GLib.timeout_add(500, refresh)
 
     def render(self, state, error):
         was_connected = self.connected
         self.connected = error is None and state is not None
+        self.pending_buttons()
         if not self.connected:
             self.headline.set_text("Waiting for the background service")
+            self.status_details.set_text("")
             self.message.set_text("anaNAS is reconnecting automatically. Previously displayed figures may be out of date.")
             self.pause.set_sensitive(False)
             return False
         self.state = state
         if not was_connected:
             self.message.set_text("")
-        self.headline.set_text("Synchronization paused" if state.get("paused") else state.get("syncReason", "Connected"))
+        reason = state.get("syncReason", "Connected")
+        if state.get("paused"):
+            title = "Synchronization paused"
+        elif reason.startswith("Eligible files synced"):
+            title = "Some files need attention"
+        elif reason.startswith("Synchronization needs attention"):
+            title = "Synchronization needs attention"
+        else:
+            title = reason if len(reason) <= 45 and '\n' not in reason else "Synchronization status"
+        self.headline.set_text(title)
+        self.status_details.set_text(reason if reason != title else "")
         self.pause.set_label("Resume sync" if state.get("paused") else "Pause sync")
         self.pause.set_sensitive(not self.controlling)
         traffic = state.get("traffic", {})
@@ -289,6 +392,8 @@ class Panel(Gtk.Application):
         self.recent_title.set_text(f"{state.get('updatedLast24Hours', 0):,} completed updates in the last 24 hours")
         self.recent_model.clear()
         for item in state.get("recentUpdates") or []:
+            if internal_trial_path(item.get("path", "")):
+                continue
             self.recent_model.append([local_time(item.get("at")),
                                       f"{item.get('direction', '')} · {item.get('action', '')}", item.get("path", "")])
         return False
@@ -314,6 +419,67 @@ class Panel(Gtk.Application):
         self.submit(self.client.status, self.render)
         self.refresh_button.set_sensitive(False)
         self.submit(lambda: self.client.storage(), self.storage_done)
+        if self.notebook.get_nth_page(self.notebook.get_current_page()) == self.pending_page:
+            self.load_pending("")
+
+    def pending_buttons(self):
+        model, node = self.pending_view.get_selection().get_selected()
+        available = self.connected and self.pending_valid and not self.pending_loading and not self.confirming
+        self.confirm_one.set_sensitive(available and node is not None and model[node][4])
+        self.confirm_all.set_sensitive(available and self.pending_total > 0)
+        self.pending_more.set_sensitive(available and bool(self.pending_next))
+        self.pending_first.set_sensitive(available and bool(self.pending_after))
+
+    def load_pending(self, after=""):
+        if self.pending_loading or self.confirming:
+            return
+        self.pending_loading = True
+        self.pending_buttons()
+        def done(value, error):
+            self.pending_loading = False
+            if error:
+                self.pending_valid = False
+                self.pending_result.set_text("Could not load pending files. Refresh to try again.")
+            else:
+                self.pending_valid = True
+                self.pending_after = after
+                self.pending_next = value.get("next", "")
+                self.pending_total = value["total"]
+                selected_model, selected_node = self.pending_view.get_selection().get_selected()
+                selected_path = selected_model[selected_node][0] if selected_node is not None else None
+                self.pending_model.clear()
+                for item in value["items"]:
+                    node = self.pending_model.append([item["path"], size(item["size"]), item["action"], item["reason"], item["confirmable"], str(item["generation"])])
+                    if item["path"] == selected_path:
+                        self.pending_view.get_selection().select_iter(node)
+                self.pending_summary.set_text(f"{self.pending_total:,} pending files and folder operations · {len(value['items']):,} shown")
+            self.pending_buttons()
+            return False
+        if not self.submit(lambda: self.client.pending_files(after), done):
+            self.pending_loading = False
+            self.pending_buttons()
+
+    def confirm_pending(self, all_files):
+        if not self.connected or self.confirming or self.pending_loading:
+            return
+        model, node = self.pending_view.get_selection().get_selected()
+        if not all_files and (node is None or not model[node][4]):
+            return
+        path, generation = (None, None) if all_files else (model[node][0], int(model[node][5]))
+        self.confirming = True
+        self.pending_buttons()
+        def done(value, error):
+            self.confirming = False
+            if error:
+                self.pending_result.set_text("Could not confirm sync. The file may have changed; refresh and try again.")
+            else:
+                self.pending_result.set_text(f"Confirmed {value['queued']:,} pending operations · {value['blocked']:,} blocked. Files remain pending until their transfer is confirmed.")
+                self.load_pending(self.pending_after)
+            self.pending_buttons()
+            return False
+        if not self.submit(lambda: self.client.confirm_sync(path, generation, all_files), done):
+            self.confirming = False
+            self.pending_buttons()
 
     def storage_done(self, data, error):
         self.refresh_button.set_sensitive(True)
@@ -339,7 +505,16 @@ class Panel(Gtk.Application):
         return False
 
     def row(self, item, total, loaded=False):
-        return [item["name"], size(item["localBytes"]), size(item["syncedBytes"]),
+        files, synced = item["files"], item.get("syncedFiles")
+        if synced is None:
+            progress = "Unknown"
+        elif not files:
+            progress = "No files"
+        else:
+            percent = min(100, synced * 100 / files)
+            # Never round unfinished work up to 100%.
+            progress = f"{min(99.9, percent) if synced < files else 100:.1f}% · {files - synced:,} pending"
+        return [item["name"], size(item["localBytes"]), progress,
                 f"{item['files']:,}", min(100, round(item["localBytes"] * 100 / max(1, total))), item["path"], loaded]
 
     def populate(self, parent, usage):
@@ -352,6 +527,8 @@ class Panel(Gtk.Application):
             self.model.remove(child)
             child = self.model.iter_children(parent)
         for item in usage["children"]:
+            if internal_trial_path(item["path"]):
+                continue
             if item["name"].startswith(".") and not self.show_hidden.get_active():
                 continue
             node = self.model.append(parent, self.row(item, usage["localBytes"]))
@@ -414,22 +591,101 @@ class Panel(Gtk.Application):
         folder = self.folder_at(path)
         if folder is None:
             return False
-        if getattr(self, "folder_menu", None) is not None:
-            self.folder_menu.destroy()
-        self.folder_menu = Gtk.Menu()
-        self.folder_menu.attach_to_widget(self.tree, None)
-        for title, action in (("Open directory", self.open_directory),
-                              ("Open terminal here", self.open_terminal)):
+        return self.show_directory_menu(self.tree, path, folder, "folder_menu", "Open directory", event)
+
+    def pending_directory(self, path):
+        from pathlib import PurePosixPath
+        relative = self.pending_model[path][0]
+        value = PurePosixPath(relative)
+        if not relative or value.is_absolute() or ".." in value.parts or "\x00" in relative:
+            self.message.set_text("This file path is invalid. Refresh the pending list and try again.")
+            return None
+        # Open the parent even for blocked names or deleted entries. Use Linux
+        # path semantics: backslashes and shell metacharacters are literal names.
+        return str(value.parent)
+
+    def activate_pending(self, _tree, path, _column):
+        directory = self.pending_directory(path)
+        if directory is not None:
+            self.open_directory(directory)
+
+    def pending_button_press(self, tree, event):
+        if event.button != 3:
+            return False
+        hit = tree.get_path_at_pos(int(event.x), int(event.y))
+        if hit is None:
+            return False
+        tree.set_cursor(hit[0])
+        return self.show_pending_menu(hit[0], event)
+
+    def pending_keyboard_menu(self, tree):
+        model, selected = tree.get_selection().get_selected()
+        if selected is None:
+            return False
+        return self.show_pending_menu(model.get_path(selected))
+
+    def show_pending_menu(self, path, event=None):
+        directory = self.pending_directory(path)
+        if directory is None:
+            return False
+        return self.show_directory_menu(self.pending_view, path, directory,
+                                        "pending_menu", "Open containing folder", event,
+                                        [("Delete…", lambda _folder, relative=self.pending_model[path][0]: self.delete_pending(relative))])
+
+    def delete_pending(self, relative):
+        from pathlib import PurePosixPath
+        path = PurePosixPath(relative)
+        if not relative or str(path) == '.' or path.is_absolute() or '..' in path.parts or '\x00' in relative or internal_trial_path(relative):
+            self.message.set_text("This file path cannot be deleted from the pending list.")
+            return
+        dialog = Gtk.MessageDialog(transient_for=self.window, modal=True,
+                                   message_type=Gtk.MessageType.WARNING,
+                                   buttons=Gtk.ButtonsType.NONE, text="Move this item to Trash?")
+        dialog.format_secondary_text(f"{relative}\n\nThis removes the local item. For synchronized content, its deletion will also be synchronized to the NAS.")
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Move to Trash", Gtk.ResponseType.ACCEPT)
+        dialog.set_default_response(Gtk.ResponseType.CANCEL)
+        dialog.get_widget_for_response(Gtk.ResponseType.CANCEL).grab_focus()
+        def response(window, choice):
+            window.destroy()
+            if choice != Gtk.ResponseType.ACCEPT:
+                return
+            file = Gio.File.new_for_path(str(self.root.joinpath(relative)))
+            def done(source, result):
+                try:
+                    source.trash_finish(result)
+                except GLib.Error as error:
+                    if error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.NOT_FOUND):
+                        self.pending_result.set_text("This item is already absent locally. Refreshing pending status; any required NAS deletion remains queued.")
+                        self.load_pending(self.pending_after)
+                    else:
+                        self.pending_result.set_text(f"Could not move {relative} to Trash: {error.message}")
+                else:
+                    self.pending_result.set_text("Moved to Trash. Pending status updates after the file change is observed.")
+                    self.load_pending(self.pending_after)
+            file.trash_async(GLib.PRIORITY_DEFAULT, None, done)
+        dialog.connect("response", response)
+        dialog.show_all()
+
+    def show_directory_menu(self, tree, path, folder, attribute, folder_title, event=None, extra=()):
+        previous = getattr(self, attribute, None)
+        if previous is not None:
+            previous.destroy()
+        menu = Gtk.Menu()
+        setattr(self, attribute, menu)
+        menu.attach_to_widget(tree, None)
+        for title, action in [(folder_title, self.open_directory),
+                              ("Open terminal here", self.open_terminal)] + list(extra):
             item = Gtk.MenuItem(label=title)
             item.connect("activate", lambda _item, action=action: action(folder))
-            self.folder_menu.append(item)
-        self.folder_menu.show_all()
+            menu.append(item)
+        menu.show_all()
         if event is not None:
-            self.folder_menu.popup_at_pointer(event)
+            menu.popup_at_pointer(event)
         else:
-            rectangle = self.tree.get_cell_area(path, self.tree.get_column(0))
-            self.folder_menu.popup_at_rect(self.tree.get_bin_window(), rectangle,
-                                          Gdk.Gravity.SOUTH_WEST, Gdk.Gravity.NORTH_WEST, None)
+            rectangle = tree.get_cell_area(path, tree.get_column(0))
+            menu.popup_at_rect(tree.get_bin_window(), rectangle,
+                               Gdk.Gravity.SOUTH_WEST, Gdk.Gravity.NORTH_WEST, None)
         return True
 
     def open_terminal(self, relative, software=False):

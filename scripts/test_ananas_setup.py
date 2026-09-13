@@ -239,6 +239,10 @@ class SetupTests(unittest.TestCase):
                 for path in Path(plan['profile']).glob('*.json'):
                     self.assertNotIn(session.password.encode(), path.read_bytes())
                 nas = json.loads(payloads[plan['base'] + '/helper.json'])
+                pc = json.loads((Path(plan['profile']) / 'config.json').read_bytes())
+                for key in ('maxFileBytes', 'maxBatchBytes'):
+                    self.assertEqual(nas[key], 8 << 30)
+                    self.assertEqual(pc['sync'][key], nas[key])
                 self.assertEqual(nas['root'], '/share/Volume/Public/new-folder')
                 self.assertEqual(nas['peers'], ['10.23.42.17'])
                 self.assertEqual(nas['uid'], 1000)

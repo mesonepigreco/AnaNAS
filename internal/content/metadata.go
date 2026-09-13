@@ -12,6 +12,11 @@ import (
 	"nas-sync/internal/index"
 )
 
+var ErrUnsupported = errors.New("unsupported or excluded candidate")
+
+// CheckAvailable distinguishes a missing/replaced root from a single bad file.
+func (r *Root) CheckAvailable() error { return r.checkRoot() }
+
 // SameObservedContent compares regular files strictly. Directories synchronize
 // identity/type, not size or timestamps changed by independent child operations.
 // The caller must still validate native root/path access and index generation.
@@ -60,7 +65,7 @@ func (r *Root) Metadata(name string) (fingerprint index.Fingerprint, missing boo
 			return fingerprint, false, err
 		}
 		if (!info.Mode().IsRegular() && !info.IsDir()) || r.matcher.Match(name, info.IsDir()) {
-			return fingerprint, false, fmt.Errorf("unsupported or excluded candidate")
+			return fingerprint, false, ErrUnsupported
 		}
 		fingerprint = Fingerprint(info)
 	}

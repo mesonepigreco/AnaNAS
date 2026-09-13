@@ -66,13 +66,13 @@ def run(args):
     assert client.status()['paused'] == initial['paused']
     evidence['pauseRoundTripRestored'] = True
 
-    fixtures = {'anaNAS-live-check.bin': '92946dbfe4fffdafa28de54fae20bf7b97b50bc5207c527567e4705b68748977',
-                'anaNAS-folders-652d4b073f43/inner/probe.bin': '8fb3f76739753c830276daa42fee843ebd4e5980c8e76060327c7334258e8469'}
+    fixtures = {'anaNAS-live-check.bin': '1111111111111111111111111111111111111111111111111111111111111111',
+                'anaNAS-folders-aaaaaaaaaaaa/inner/probe.bin': '2222222222222222222222222222222222222222222222222222222222222222'}
     for root in (Path('/home/example-user/NASdir'), Path('/mnt/nasdir')):
         for name, digest in fixtures.items():
             assert not (root / name.split('/')[0]).exists()
             assert hashlib.sha256((root / '.ananas-tests' / name).read_bytes()).hexdigest() == digest
-        assert not (root / 'anaNAS-deletions-1f069b41dcee').exists()
+        assert not (root / 'anaNAS-deletions-bbbbbbbbbbbb').exists()
     evidence['archiveHashesMatchBothSides'] = True
 
     # Render real data in an isolated verification window, not other applications.

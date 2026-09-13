@@ -624,13 +624,13 @@ def _install(session, inventory, plan, progress):
     config["sync"] = {"enabled": True, "port": plan["port"], "source": session.route["source"],
                       "namespace": namespace, "replicaNamespace": secrets.token_hex(32),
                       "certificate": str(tls / "client.pem"), "privateKey": str(tls / "client.key"), "ca": str(tls / "ca.pem"),
-                      "serverFingerprint": pins["server"], "maxFileBytes": 67108864, "maxBatchBytes": 134217728, "maxCacheEntries": 1000000}
+                      "serverFingerprint": pins["server"], "maxFileBytes": 8589934592, "maxBatchBytes": 8589934592, "maxCacheEntries": 1000000}
     nas = {"liveWrites": True, "root": root, "stateDir": base + "/state", "observerStateDir": base + "/observer",
            "namespace": namespace, "listen": f"{session.host}:{plan['port']}", "interface": device, "prefix": session.route["prefix"],
            "peers": [session.route["source"]], "uid": account["uid"], "gid": account["gid"], "groups": [account["gid"]],
            "certificate": base + "/server.pem", "privateKey": base + "/server.key", "clientCA": base + "/ca.pem",
            "clients": {pins["client"]: identity}, "exclusions": ["@Recycle/"], "maxConnections": 2,
-           "maxFileBytes": 67108864, "maxBatchBytes": 134217728, "maxCacheBytes": 1099511627776,
+           "maxFileBytes": 8589934592, "maxBatchBytes": 8589934592, "maxCacheBytes": 1099511627776,
            "maxCacheEntries": 1000000, "readBytesPerSecond": 1073741824}
     progress("Installing the QNAP helper and its private certificates…")
     session.command("set -eu; umask 077; mkdir " + q(base) + "; chmod 755 " + q(base) +

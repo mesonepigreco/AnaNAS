@@ -22,6 +22,14 @@ material and unexpected binary/runtime files. It is not a formal security audit
 or a guarantee that the application has no vulnerabilities. Privileged setup and
 NAS writes still require reviewing the selected targets and keeping backups.
 
-The publication cleanup amends only the new, unpushed commit. It does not rewrite
-previously published repository history or change an installed application's
-configuration, services, credentials or data.
+The current reliability/control-panel publication was checked again across tracked
+files and unignored additions. Legacy trial suffixes and content fingerprints were
+replaced with synthetic placeholders; detailed machine measurements were replaced
+with a validation-scope summary. README setup guidance now identifies the settings
+each user must provide. Raw evidence and local AGENTS.md remain ignored.
+
+Checks cover known deployment identifiers, account paths, private-key/token
+patterns, binary/runtime artifacts and the exact staged file list. Documentation
+and test examples deliberately contain fictitious LAN addresses and paths.
+This cleanup does not rewrite previously published repository history or change
+an installed application's configuration, services, credentials or data.

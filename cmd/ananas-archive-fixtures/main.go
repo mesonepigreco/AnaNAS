@@ -1,4 +1,4 @@
-// Archive the exact verified fixtures from the September 2026 live trial.
+// Legacy archive template: replace illustrative fixture names and hashes before use.
 // Stop nas-sync.service before --apply so the database lock is exclusive.
 package main
 
@@ -20,11 +20,11 @@ import (
 const local = "/home/example-user/NASdir"
 const nas = "/mnt/nasdir"
 
-var names = []string{"anaNAS-live-check.bin", "anaNAS-folders-652d4b073f43", "anaNAS-deletions-1f069b41dcee"}
-var dirs = []string{"anaNAS-folders-652d4b073f43", "anaNAS-folders-652d4b073f43/inner", "anaNAS-folders-652d4b073f43/empty", "anaNAS-deletions-1f069b41dcee"}
+var names = []string{"anaNAS-live-check.bin", "anaNAS-folders-aaaaaaaaaaaa", "anaNAS-deletions-bbbbbbbbbbbb"}
+var dirs = []string{"anaNAS-folders-aaaaaaaaaaaa", "anaNAS-folders-aaaaaaaaaaaa/inner", "anaNAS-folders-aaaaaaaaaaaa/empty", "anaNAS-deletions-bbbbbbbbbbbb"}
 var hashes = map[string]string{
-	"anaNAS-live-check.bin":                       "92946dbfe4fffdafa28de54fae20bf7b97b50bc5207c527567e4705b68748977",
-	"anaNAS-folders-652d4b073f43/inner/probe.bin": "8fb3f76739753c830276daa42fee843ebd4e5980c8e76060327c7334258e8469",
+	"anaNAS-live-check.bin":                       "1111111111111111111111111111111111111111111111111111111111111111",
+	"anaNAS-folders-aaaaaaaaaaaa/inner/probe.bin": "2222222222222222222222222222222222222222222222222222222222222222",
 }
 
 func check(root string) error {

@@ -22,7 +22,7 @@ var (
 )
 
 func initSyncState(tx *bolt.Tx) error {
-	for _, name := range [][]byte{bases, pathStates, activityCounts, activityRecent} {
+	for _, name := range [][]byte{bases, pathStates, activityCounts, activityRecent, syncRequests, syncIssues} {
 		if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 			return err
 		}
@@ -54,8 +54,20 @@ func initSyncState(tx *bolt.Tx) error {
 }
 
 func updateDirty(tx *bolt.Tx, r Record) error {
+	issue, err := readSyncIssue(tx, r)
+	if err != nil {
+		return err
+	}
+	if issue == nil || !r.Dirty || r.Excluded {
+		if err := tx.Bucket(syncIssues).Delete([]byte(r.Path)); err != nil {
+			return err
+		}
+	}
 	if r.Dirty && !r.Excluded {
 		return tx.Bucket(dirty).Put([]byte(r.Path), []byte{1})
+	}
+	if err := tx.Bucket(syncRequests).Delete([]byte(r.Path)); err != nil {
+		return err
 	}
 	return tx.Bucket(dirty).Delete([]byte(r.Path))
 }

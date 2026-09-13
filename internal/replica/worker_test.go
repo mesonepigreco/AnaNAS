@@ -3,13 +3,145 @@ package replica
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"nas-sync/internal/changefeed"
+	"nas-sync/internal/index"
 	"nas-sync/internal/journal"
 )
+
+func TestDeletedUnsupportedNameLeavesQueueAndRecreationReturns(t *testing.T) {
+	_, db, _ := preparationFixture(t)
+	defer db.Close()
+	r := index.Record{Path: `folder/\`, Missing: true}
+	if err := db.Put([]index.Record{r, {Path: "good"}}, false); err != nil {
+		t.Fatal(err)
+	}
+	w := &Worker{db: db, opts: WorkerOptions{PushOptions: PushOptions{MaxFileBytes: 10, MaxBatchBytes: 20}}}
+	paths, _, err := w.selectLocal("")
+	if err != nil || len(paths) != 1 || paths[0] != "good" {
+		t.Fatal(paths, err)
+	}
+	p, err := db.PendingSync(context.Background(), "", 10)
+	if err != nil || p.Total != 1 {
+		t.Fatal(p, err)
+	}
+	r.Missing = false
+	if err := db.Put([]index.Record{r}, false); err != nil {
+		t.Fatal(err)
+	}
+	if cleared, err := db.ClearUnsupportedAbsence(r.Path, 1); err != nil || cleared {
+		t.Fatal(cleared, err)
+	}
+	p, err = db.PendingSync(context.Background(), "", 10)
+	if err != nil || p.Total != 2 {
+		t.Fatal(p, err)
+	}
+	if cleared, err := db.ClearUnsupportedAbsence("good", 1); err != nil || cleared {
+		t.Fatal(cleared, err)
+	}
+}
+
+func TestConfirmedFileGetsPriorityDuringExistingPassWithoutSkippingParent(t *testing.T) {
+	_, db, _ := preparationFixture(t)
+	defer db.Close()
+	if err := db.Put([]index.Record{{Path: "a-ordinary"}, {Path: "z-folder", Fingerprint: index.Fingerprint{Mode: uint32(os.ModeDir)}}, {Path: "z-folder/file"}}, false); err != nil {
+		t.Fatal(err)
+	}
+	w := &Worker{db: db, opts: WorkerOptions{PushOptions: PushOptions{MaxFileBytes: 10, MaxBatchBytes: 20}}, wake: make(chan struct{}, 1)}
+	pass := workerPass{requestsDone: true}
+	if _, err := db.ConfirmSync(context.Background(), index.SyncConfirmation{Path: "z-folder/file", Generation: 1}, 10); err != nil {
+		t.Fatal(err)
+	}
+	w.RequestSync()
+	for _, want := range []string{"z-folder", "z-folder/file"} {
+		paths, _, err := w.selectNextLocal(&pass)
+		if err != nil || len(paths) != 1 || paths[0] != want {
+			t.Fatal(paths, err, want)
+		}
+	}
+	paths, more, err := w.selectNextLocal(&pass)
+	if err != nil || len(paths) != 0 || !more {
+		t.Fatal(paths, more, err)
+	}
+	paths, _, err = w.selectNextLocal(&pass)
+	if err != nil || len(paths) == 0 || paths[0] != "a-ordinary" {
+		t.Fatal("ordinary queue lost", paths, err)
+	}
+}
+
+func TestOversizedFilesDoNotStarveLaterDirtyPages(t *testing.T) {
+	_, db, _ := preparationFixture(t)
+	defer db.Close()
+	records := []index.Record{{Path: "0-small", Fingerprint: index.Fingerprint{Size: 1}}}
+	for i := 0; i < journal.MaxEntries+2; i++ {
+		records = append(records, index.Record{Path: fmt.Sprintf("a-big-%04d", i), Fingerprint: index.Fingerprint{Size: 11}})
+	}
+	records = append(records, index.Record{Path: "z-small", Fingerprint: index.Fingerprint{Size: 1}})
+	if err := db.Put(records, false); err != nil {
+		t.Fatal(err)
+	}
+	w := &Worker{db: db, opts: WorkerOptions{PushOptions: PushOptions{MaxFileBytes: 10, MaxBatchBytes: 20}}}
+	var selected []string
+	cursor := ""
+	for i := 0; ; i++ {
+		if i > 5 {
+			t.Fatal("selection did not terminate")
+		}
+		paths, next, err := w.selectLocal(cursor)
+		if err != nil && !errors.Is(err, ErrAttention) {
+			t.Fatal(err)
+		}
+		selected = append(selected, paths...)
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	if len(selected) != 2 || selected[0] != "0-small" || selected[1] != "z-small" {
+		t.Fatal(selected)
+	}
+	r, _, err := db.Get("a-big-0000")
+	if err != nil || !r.Dirty || r.Excluded {
+		t.Fatal("oversized work lost", r, err)
+	}
+	// Raising the limit makes the retained work eligible without a new event.
+	w.opts.MaxFileBytes = 20
+	paths, _, err := w.selectLocal("0-small")
+	if err != nil || len(paths) != 1 || paths[0] != "a-big-0000" {
+		t.Fatal(paths, err)
+	}
+}
+
+func TestMultiGiBSelectionAndBatchBoundaries(t *testing.T) {
+	_, db, _ := preparationFixture(t)
+	defer db.Close()
+	records := []index.Record{
+		{Path: "a", Fingerprint: index.Fingerprint{Size: 3<<30 + 17}},
+		{Path: "b", Fingerprint: index.Fingerprint{Size: 8 << 30}},
+		{Path: "c", Fingerprint: index.Fingerprint{Size: 8<<30 + 1}},
+		{Path: "d", Fingerprint: index.Fingerprint{Size: 1}},
+	}
+	if err := db.Put(records, false); err != nil {
+		t.Fatal(err)
+	}
+	w := &Worker{db: db, opts: WorkerOptions{PushOptions: PushOptions{MaxFileBytes: 8 << 30, MaxBatchBytes: 8 << 30}}}
+	cursor := ""
+	for _, want := range []string{"a", "b", "d"} {
+		paths, next, err := w.selectLocal(cursor)
+		if err != nil && !errors.Is(err, ErrAttention) {
+			t.Fatal(err)
+		}
+		if len(paths) != 1 || paths[0] != want {
+			t.Fatal(paths, want)
+		}
+		cursor = next
+	}
+}
 
 type quietWorkerRemote struct {
 	WorkerRemote // All unimplemented transfer methods must remain unreachable.

@@ -19,9 +19,9 @@
   },
   "exclusions": [],
   "maxConnections": 2,
-  "maxFileBytes": 1048576,
-  "maxBatchBytes": 2097152,
-  "maxCacheBytes": 33554432,
-  "maxCacheEntries": 128,
+  "maxFileBytes": 8589934592,
+  "maxBatchBytes": 8589934592,
+  "maxCacheBytes": 1099511627776,
+  "maxCacheEntries": 1000000,
   "readBytesPerSecond": 2097152
 }

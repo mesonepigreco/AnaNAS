@@ -33,8 +33,9 @@ type Publisher struct {
 	exclusions  *exclude.Matcher
 	rate        int64
 	// Used only by local crash/race tests at actual filesystem boundaries.
-	afterRename  func() error
-	beforeRename func() error
+	afterRename         func() error
+	beforeRename        func() error
+	afterAbsenceReceipt func() error
 }
 
 func openAbsolute(path string) (*os.File, error) {
@@ -410,7 +411,7 @@ func (p *Publisher) Publish(ctx context.Context, r journal.Record) error {
 			return fmt.Errorf("invalid candidate identity")
 		}
 		if err := p.apply(ctx, e); err != nil {
-			return err
+			return fmt.Errorf("publish %q: %w", e.Path, err)
 		}
 	}
 	return nil
@@ -598,11 +599,43 @@ func (p *Publisher) apply(ctx context.Context, e journal.Entry) error {
 
 func (p *Publisher) remove(ctx context.Context, e journal.Entry, parent *os.File, name string, visible *os.File, d hash.Digest, n int64, base *journal.Version, absent bool) error {
 	displaced := e.Next.ID + ".displaced"
+	// An earlier attempt accepted an independently missing leaf. A recreation
+	// after that receipt is new local content, even if it matches the old base.
+	if receipt, err := p.identityReceipt(e.Next.ID, ".absent"); err == nil {
+		current, err := identity(parent)
+		if err != nil {
+			return err
+		}
+		if !absent || current != receipt {
+			return ErrExternal
+		}
+		return p.confirmMissingLeaf(ctx, e, parent, name)
+	} else if !errors.Is(err, unix.ENOENT) {
+		return err
+	}
 	if absent {
 		if base == nil || base.Tombstone {
 			return errors.Join(parent.Sync(), p.state.Sync())
 		}
 		old, od, on, err := p.checkFile(ctx, p.state, displaced)
+		if errors.Is(err, unix.ENOENT) {
+			// Both sides may delete the same file before remote replay. There
+			// is no displaced inode in that case; verify retained history and
+			// confirm the absent leaf instead of retrying a nonexistent backup.
+			ready, err := p.ready(base.ID)
+			if err != nil {
+				return fmt.Errorf("retained deletion base: %w", err)
+			}
+			defer ready.Close()
+			rd, rn, err := p.digestCopy(ctx, ready, nil)
+			if err != nil {
+				return err
+			}
+			if !same(rd, rn, base) {
+				return ErrExternal
+			}
+			return p.confirmMissingLeaf(ctx, e, parent, name)
+		}
 		if err != nil {
 			return err
 		}

@@ -105,7 +105,7 @@ func (r *Root) open(path string) (*os.File, error) {
 	}
 	if !st.Mode().IsRegular() {
 		f.Close()
-		return nil, fmt.Errorf("candidate is not a regular file")
+		return nil, ErrUnsupported
 	}
 	return f, nil
 }

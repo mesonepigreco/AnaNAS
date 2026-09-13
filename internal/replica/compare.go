@@ -67,7 +67,7 @@ func Compare(ctx context.Context, db *index.DB, root *content.Root, c *journal.C
 	}
 	result.Base = base
 	if base != nil && (base.BlockSize != 65536 || base.Content.Size > o.MaxFileBytes) {
-		return result, fmt.Errorf("base exceeds comparison limits")
+		return result, fmt.Errorf("%w: base exceeds comparison limits", ErrAttention)
 	}
 	if namespace, err := db.ReplicaNamespace(); err != nil {
 		return result, err
@@ -81,11 +81,14 @@ func Compare(ctx context.Context, db *index.DB, root *content.Root, c *journal.C
 	if err != nil {
 		return result, err
 	}
-	if pending || (base == nil) != (acknowledged == nil) {
-		return result, index.ErrStale
+	if pending {
+		return result, journal.ErrPending
+	}
+	if (base == nil) != (acknowledged == nil) {
+		return result, fmt.Errorf("%w: local base and replica journal disagree", journal.ErrIdentity)
 	}
 	if base != nil && (acknowledged.ID != base.Content.ID || acknowledged.Size != base.Content.Size || acknowledged.Directory != base.Content.Directory || acknowledged.Tombstone != base.Content.Tombstone) {
-		return result, index.ErrStale
+		return result, fmt.Errorf("%w: local base differs from replica journal", journal.ErrIdentity)
 	}
 	check := func(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
@@ -158,7 +161,7 @@ func Compare(ctx context.Context, db *index.DB, root *content.Root, c *journal.C
 		}
 	} else {
 		if observed.Fingerprint.Size < 0 || observed.Fingerprint.Size > o.MaxFileBytes {
-			return result, fmt.Errorf("local file exceeds comparison limit")
+			return result, fmt.Errorf("%w: local file exceeds comparison limit", ErrAttention)
 		}
 		result.Local, err = root.Hash(ctx, path, observed.Fingerprint, 65536, o.ReadBytesPerSecond)
 		if err != nil {
@@ -189,7 +192,7 @@ func Compare(ctx context.Context, db *index.DB, root *content.Root, c *journal.C
 			return result, err
 		}
 		if v.Size > o.MaxFileBytes {
-			return result, fmt.Errorf("remote file exceeds comparison limit")
+			return result, fmt.Errorf("%w: remote file exceeds comparison limit", ErrAttention)
 		}
 		m := &manifest.Manifest{BlockSize: 65536, Content: diff.Manifest{ID: v.ID, Size: v.Size, Directory: v.Directory, Tombstone: v.Tombstone}}
 		if acknowledged != nil && v.ID == acknowledged.ID {

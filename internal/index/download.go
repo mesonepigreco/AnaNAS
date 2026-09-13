@@ -79,6 +79,9 @@ func (d *DB) FinalizeDownload(namespace string, sequence uint64, operation strin
 			if err := tx.Bucket(bases).Put([]byte(e.Path), encoded[i]); err != nil {
 				return err
 			}
+			if err := tx.Bucket(syncIssues).Delete([]byte(e.Path)); err != nil {
+				return err
+			}
 		}
 		if err := recordActivity(tx, batch.Entries, "from NAS", time.Now()); err != nil {
 			return err

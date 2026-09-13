@@ -161,6 +161,9 @@ func statusReason(network daemon.NetworkStatus, observation observe.Status, work
 		if work.Phase == "attention" {
 			return "Synchronization needs attention: " + work.LastError
 		}
+		if work.Phase == "partial" {
+			return "Eligible files synced; some paths need attention: " + work.LastError
+		}
 		return work.LastError
 	}
 	if work.Phase == "working" {

@@ -18,6 +18,18 @@ addresses, paths, machine identifiers or raw operational logs.
   panel with transfer accounting, NAS capacity, indexed sizes and folder actions.
 - Separation of action errors from connection status, first-expansion correction,
   default file-manager/terminal launching and legible menu styling.
+- Notification reconnection replaces abandoned streams for the same authenticated
+  identity; folder progress counts confirmed current files and pending files.
+- Oversized local files remain pending without starving later eligible uploads.
+- Native Pending files tab with paginated operations and blocker reasons,
+  per-file and all-file confirmation, and durable priority scheduling.
+  Pending rows also open their containing folder or a terminal through the same
+  desktop actions as the folder panel.
+- Recovery when a regular file is deleted independently on both sides, with
+  durable absence receipts, recreation preservation and corrected retry classification.
+- Per-source failure isolation with durable, generation-bound reasons in Pending
+  files; partial-completion status, automatic changed-source/service retries and
+  real TLS fault-injection coverage. See [reliability audit](docs/reliability-audit.md).
 - Interactive source installer and native setup wizard: QNAP-only discovery,
   hostname beside address, SSH host-key verification, credential reuse, accessible
   shared-folder browsing, configured-first ordering, folder and pineapple icons.

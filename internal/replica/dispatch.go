@@ -193,7 +193,7 @@ func (p *Pusher) Dispatch(ctx context.Context) (*journal.Record, error) {
 		}
 		stream, err := OpenUploadWire(ctx, p.store, e.Next.ID, stage.WireInfo{Size: u.DeltaBytes[i], Digest: u.DeltaDigests[i]}, p.opts.ReadBytesPerSecond)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("upload spool for %q: %w", e.Path, err)
 		}
 		streams[i] = stream
 		opened = append(opened, stream)

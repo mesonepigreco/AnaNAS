@@ -1,8 +1,8 @@
 # Interactive setup wizard — 2026-09-12
 
 The source installer and native GTK wizard are a first setup implementation,
-not yet a fresh-QNAP end-to-end acceptance result. The current Nasdir deployment
-remains independent and is not migrated or overwritten.
+not yet a fresh-QNAP end-to-end acceptance result. Existing installations remain
+independent and are not migrated or overwritten.
 
 ## Start
 
@@ -129,7 +129,7 @@ wizard does not invoke them.
   rotation, certificate renewal UI, or automatic partial-install recovery.
 - Helper certificates expire after one year. DHCP/IP/interface changes require
   configuration maintenance; setup deliberately pins direct-LAN endpoints.
-- Engine limitations still apply: 64 MiB default file cap, unfinished general
+- Engine limitations still apply: 8 GiB file/batch cap, unfinished general
   directory deletion, conflict choices and broader reconciliation acceptance.
 - Automated checks cover QNAP-only identity filtering, friendly connection-error
   classification, configured-first ordering, nested-root shortcuts, bounded folder

@@ -18,22 +18,40 @@ type changeEvent struct {
 	Through   uint64 `json:"through"`
 }
 
+type eventStream struct {
+	cancel context.CancelFunc
+}
+
 func (s *Server) events(w http.ResponseWriter, r *http.Request, id string) {
 	w.Header().Set("Connection", "close")
 	if r.ContentLength != 0 || len(r.TransferEncoding) != 0 || r.URL.RawQuery != "" {
 		fail(w, 400, fmt.Errorf("notification request must have no body or query"))
 		return
 	}
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	stream := &eventStream{cancel: cancel}
 	s.streamsMu.Lock()
-	if s.streams[id] || len(s.streams) >= s.opts.MaxEventStreams {
+	previous := s.streams[id]
+	if previous == nil && len(s.streams) >= s.opts.MaxEventStreams {
 		s.streamsMu.Unlock()
 		fail(w, 503, fmt.Errorf("notification stream limit reached"))
 		return
 	}
-	s.streams[id] = true
+	// A reboot or silent link loss can leave an idle TCP stream alive. The
+	// authenticated identity may replace its own stream without another slot.
+	if previous != nil {
+		previous.cancel()
+	}
+	s.streams[id] = stream
 	s.streamsMu.Unlock()
-	defer func() { s.streamsMu.Lock(); delete(s.streams, id); s.streamsMu.Unlock() }()
-	ctx := r.Context()
+	defer func() {
+		s.streamsMu.Lock()
+		if s.streams[id] == stream {
+			delete(s.streams, id)
+		}
+		s.streamsMu.Unlock()
+	}()
 	gate := func() error {
 		check, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()

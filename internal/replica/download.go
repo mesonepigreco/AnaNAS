@@ -131,7 +131,7 @@ func FinishDownload(ctx context.Context, db *index.DB, c *journal.Coordinator, s
 		}
 		manifests[i], err = retainedManifest(ctx, store, e.Next, pace)
 		if err != nil {
-			return err
+			return fmt.Errorf("download snapshot for %q: %w", e.Path, err)
 		}
 	}
 	if err := check(ctx); err != nil {

@@ -74,3 +74,40 @@ func TestRetiredMissingDirectoryDoesNotAppearAsGhostNASFolder(t *testing.T) {
 		t.Fatal("history removed", err)
 	}
 }
+
+func TestUsageCountsOnlyConfirmedCurrentFiles(t *testing.T) {
+	db := openSyncTest(t)
+	r := Record{Path: "a/file", Fingerprint: Fingerprint{Size: 1}}
+	if err := db.Put([]Record{r, {Path: "a/empty"}, {Path: "a/excluded", Excluded: true}}, false); err != nil {
+		t.Fatal(err)
+	}
+	check := func(want int) {
+		t.Helper()
+		u, err := db.DirectoryUsage(context.Background(), "")
+		if err != nil || u.Files != 2 || u.SyncedFiles != want || len(u.Children) != 1 || u.Children[0].SyncedFiles != want {
+			t.Fatalf("usage %+v, error %v; want %d confirmed", u, err, want)
+		}
+	}
+	check(0)
+	if _, err := db.Acknowledge(r.Path, "", 1, version("a")); err != nil {
+		t.Fatal(err)
+	}
+	check(1)
+	// A same-size edit retains the old NAS byte count but is pending again.
+	if err := db.Put([]Record{r}, true); err != nil {
+		t.Fatal(err)
+	}
+	check(0)
+	if _, err := db.Acknowledge(r.Path, version("a").Content.ID, 1, version("a")); err != nil {
+		t.Fatal(err)
+	}
+	check(0) // delayed acknowledgement cannot confirm a newer generation
+	if _, err := db.Acknowledge(r.Path, version("a").Content.ID, 2, version("b")); err != nil {
+		t.Fatal(err)
+	}
+	empty := &manifest.Manifest{BlockSize: 65536, Content: diff.Manifest{ID: hash.SumBytes(nil).Hex()}}
+	if _, err := db.Acknowledge("a/empty", "", 1, empty); err != nil {
+		t.Fatal(err)
+	}
+	check(2)
+}

@@ -17,6 +17,7 @@ type DirectorySize struct {
 	LocalBytes  int64  `json:"localBytes"`
 	SyncedBytes int64  `json:"syncedBytes"`
 	Files       int    `json:"files"`
+	SyncedFiles int    `json:"syncedFiles"`
 }
 type Usage struct {
 	DirectorySize
@@ -97,6 +98,22 @@ func (d *DB) DirectoryUsage(ctx context.Context, path string) (Usage, error) {
 			}
 			if err := add(string(k), size, kind.IsDir(), false); err != nil {
 				return err
+			}
+			// Equal byte totals do not prove synchronization: edits can preserve
+			// length, and empty files still need publication. Only a clean current
+			// generation with a confirmed regular-file base counts.
+			if kind.IsRegular() && !r.Dirty {
+				base, err := readBase(tx, string(k))
+				if err != nil {
+					return err
+				}
+				if base != nil && !base.Content.Tombstone && !base.Content.Directory {
+					result.SyncedFiles++
+					name, _, nested := strings.Cut(strings.TrimPrefix(string(k), prefix), "/")
+					if nested {
+						children[name].SyncedFiles++
+					}
+				}
 			}
 		}
 		c = tx.Bucket(bases).Cursor()

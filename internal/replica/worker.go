@@ -54,19 +54,20 @@ type WorkerStatus struct {
 // validated egress, retention and remote notification delivery. Deployed observation does
 // not instantiate it. Conflicts retain their durable work and stop the pass.
 type Worker struct {
-	db            *index.DB
-	root          *content.Root
-	c             *journal.Coordinator
-	store         *stage.Store
-	remote        WorkerRemote
-	opts          WorkerOptions
-	pusher        *Pusher
-	puller        *Puller
-	wake, changes chan struct{}
-	running       atomic.Bool
-	mu            sync.Mutex
-	status        WorkerStatus
-	cancel        context.CancelFunc
+	db                *index.DB
+	root              *content.Root
+	c                 *journal.Coordinator
+	store             *stage.Store
+	remote            WorkerRemote
+	opts              WorkerOptions
+	pusher            *Pusher
+	puller            *Puller
+	wake, changes     chan struct{}
+	running           atomic.Bool
+	priorityRequested atomic.Bool
+	mu                sync.Mutex
+	status            WorkerStatus
+	cancel            context.CancelFunc
 }
 
 func NewWorker(db *index.DB, root *content.Root, c *journal.Coordinator, store *stage.Store, publisher journal.Publisher, remote WorkerRemote, o WorkerOptions) (*Worker, error) {
@@ -102,6 +103,12 @@ func (w *Worker) Notify() {
 	case w.wake <- struct{}{}:
 	default:
 	}
+}
+
+// RequestSync gives durable confirmations priority after the current operation.
+func (w *Worker) RequestSync() {
+	w.priorityRequested.Store(true)
+	w.Notify()
 }
 
 // Interrupt cancels active I/O and schedules a fresh policy check. Call after
@@ -198,8 +205,11 @@ func (w *Worker) Run(ctx context.Context) error {
 		}
 		w.update(func(s *WorkerStatus) { s.Phase = "working"; s.LastError = "" })
 		pass := workerPass{fetch: true}
-		var err error
+		err := w.db.ClearTransientIssues(workCtx)
 		for more := true; more; {
+			if err != nil {
+				break
+			}
 			if err = w.check(workCtx); err != nil {
 				break
 			}
@@ -207,6 +217,13 @@ func (w *Worker) Run(ctx context.Context) error {
 			if err != nil {
 				break
 			}
+		}
+		partial := err == nil && pass.retry == nil && pass.attention != nil
+		if err == nil && pass.retry != nil {
+			err = pass.retry
+		}
+		if err == nil {
+			err = pass.attention
 		}
 		cancel()
 		if endTask != nil {
@@ -226,6 +243,8 @@ func (w *Worker) Run(ctx context.Context) error {
 					s.Phase = "suspended"
 				} else if retryableWorkerError(err) {
 					s.Phase = "retrying"
+				} else if partial {
+					s.Phase = "partial"
 				}
 			}
 		})
@@ -252,8 +271,21 @@ func retryableWorkerError(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) {
 		return true
 	}
+	if errors.Is(err, content.ErrChanged) || errors.Is(err, index.ErrStale) || errors.Is(err, journal.ErrPending) {
+		return true
+	}
+	var remote interface{ Retryable() bool }
+	if errors.As(err, &remote) {
+		return remote.Retryable()
+	}
+	var operation *net.OpError
+	if errors.As(err, &operation) {
+		return true
+	}
+	// syscall.Errno implements net.Error even for ENOENT and EACCES. Merely
+	// matching that interface must not turn permanent file errors into retries.
 	var network net.Error
-	return errors.As(err, &network)
+	return errors.As(err, &network) && (network.Timeout() || network.Temporary())
 }
 
 func (w *Worker) finishOutbox(ctx context.Context) error {
@@ -273,18 +305,50 @@ func (w *Worker) finishOutbox(ctx context.Context) error {
 		return err
 	}
 	if _, err := w.pusher.Dispatch(ctx); err != nil {
-		return err
+		return fmt.Errorf("send upload %s: %w", u.Proposal.ID, err)
 	}
 	if err := FinishUpload(ctx, w.db, w.c, w.store, w.opts.Namespace, w.operationOptions()); err != nil {
-		return err
+		return fmt.Errorf("complete upload %s: %w", u.Proposal.ID, err)
 	}
 	w.update(func(s *WorkerStatus) { s.CompletedUploads++ })
 	return nil
 }
 
 type workerPass struct {
-	cursor string
-	fetch  bool
+	retry         error
+	requestCursor string
+	requestsDone  bool
+	attention     error
+	cursor        string
+	fetch         bool
+}
+
+func (w *Worker) selectNextLocal(pass *workerPass) ([]string, bool, error) {
+	if w.priorityRequested.Swap(false) {
+		pass.requestsDone, pass.requestCursor = false, ""
+	}
+	var paths []string
+	var next string
+	var err error
+	requested := !pass.requestsDone
+	if requested {
+		var records []index.Record
+		records, err = w.db.RequestedPage(pass.requestCursor, journal.MaxEntries)
+		if err == nil {
+			paths, next, err = w.selectRecords(records, pass.requestCursor)
+		}
+		pass.requestCursor = next
+		if next == "" {
+			pass.requestsDone = true
+		}
+	} else {
+		paths, next, err = w.selectLocal(pass.cursor)
+		pass.cursor = next
+	}
+	if errors.Is(err, ErrAttention) && next != "" {
+		pass.attention, err = err, nil
+	}
+	return paths, requested || next != "", err
 }
 
 func (w *Worker) turn(ctx context.Context, pass *workerPass) (bool, error) {
@@ -346,7 +410,7 @@ func (w *Worker) turn(ctx context.Context, pass *workerPass) (bool, error) {
 			break
 		}
 		if err := w.applyRemote(ctx, batch); err != nil {
-			return false, err
+			return false, fmt.Errorf("apply NAS update %d: %w", batch.Sequence, err)
 		}
 	}
 	state, err = w.db.RemoteState()
@@ -356,16 +420,27 @@ func (w *Worker) turn(ctx context.Context, pass *workerPass) (bool, error) {
 	if err := w.acknowledge(ctx, state); err != nil {
 		return false, err
 	}
-	paths, next, err := w.selectLocal(pass.cursor)
+	beforeSelection := *pass
+	paths, more, err := w.selectNextLocal(pass)
 	if err != nil {
 		return false, err
 	}
-	pass.cursor = next
 	if len(paths) == 0 {
-		return pass.fetch || next != "", nil
+		return more || pass.fetch, nil
 	}
 	u, comparisons, err := PrepareUpload(ctx, w.db, w.root, w.c, w.store, w.remote, paths, w.opts.Namespace, w.operationOptions())
 	if err != nil {
+		deferred, cleanupErr := w.deferLocalFailure(ctx, err, pass)
+		if cleanupErr != nil {
+			return false, cleanupErr
+		}
+		if deferred {
+			// Preparation sent nothing; revisit the other selected paths after
+			// recording the failing path, without losing their cursor positions.
+			pass.cursor, pass.requestCursor = beforeSelection.cursor, beforeSelection.requestCursor
+			pass.requestsDone = beforeSelection.requestsDone
+			return true, nil
+		}
 		return false, err
 	}
 	// Complete any prepared push before reporting other decisions. No conflict
@@ -378,7 +453,11 @@ func (w *Worker) turn(ctx context.Context, pass *workerPass) (bool, error) {
 	}
 	for i, c := range comparisons {
 		if c.Decision.Action != diff.Push && !c.Cleared {
-			return false, fmt.Errorf("%w: %s (%s)", ErrAttention, paths[i], c.Decision.Action)
+			reason := fmt.Sprintf("Needs reconciliation: %s (%s)", paths[i], c.Decision.Action)
+			if err := w.db.RecordSyncIssue(paths[i], c.Generation, reason, false); err != nil {
+				return false, err
+			}
+			pass.attention = fmt.Errorf("%w: %s; other eligible files continue", ErrAttention, reason)
 		}
 	}
 	return true, nil
@@ -439,13 +518,42 @@ func (w *Worker) selectLocal(after string) ([]string, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+	return w.selectRecords(page, after)
+}
+
+func (w *Worker) selectRecords(page []index.Record, after string) ([]string, string, error) {
 	if len(page) == 0 {
 		return nil, "", nil
 	}
 	paths := make([]string, 0, len(page))
 	var total int64
+	var attention error
 	next := after
 	for _, r := range page {
+		if reason := index.UnsupportedReason(r, w.opts.MaxFileBytes); reason != "" {
+			if r.Missing {
+				cleared, err := w.db.ClearUnsupportedAbsence(r.Path, r.Generation)
+				if err != nil {
+					return nil, "", err
+				}
+				if cleared {
+					next = r.Path
+					continue
+				}
+			}
+			attention = fmt.Errorf("%w: %q: %s; other eligible files continue", ErrAttention, r.Path, reason)
+			next = r.Path
+			continue
+		}
+		issue, err := w.db.SyncIssue(r)
+		if err != nil {
+			return nil, "", err
+		}
+		if issue != nil {
+			attention = fmt.Errorf("%w: %q: %s; other eligible files continue", ErrAttention, r.Path, issue.Reason)
+			next = r.Path
+			continue
+		}
 		state, err := w.db.PathState(r.Path)
 		if err != nil {
 			return nil, "", err
@@ -458,7 +566,7 @@ func (w *Worker) selectLocal(after string) ([]string, string, error) {
 		// the cursor past an overlapping child before its parent is acknowledged.
 		for _, p := range paths {
 			if strings.HasPrefix(r.Path, p+"/") {
-				return paths, next, nil
+				return paths, next, attention
 			}
 		}
 		if r.Missing {
@@ -472,14 +580,13 @@ func (w *Worker) selectLocal(after string) ([]string, string, error) {
 					return nil, "", err
 				}
 				if len(children) != 0 {
-					return nil, "", fmt.Errorf("%w: directory deletion %s requires child reconciliation", ErrAttention, r.Path)
+					attention = fmt.Errorf("%w: directory deletion %q requires child reconciliation; other eligible files continue", ErrAttention, r.Path)
+					next = r.Path
+					continue
 				}
 			}
 		} else if os.FileMode(r.Fingerprint.Mode).IsRegular() {
 			size := r.Fingerprint.Size
-			if size < 0 || size > w.opts.MaxFileBytes {
-				return nil, "", fmt.Errorf("%w: file %s exceeds configured limit", ErrAttention, r.Path)
-			}
 			if size > w.opts.MaxBatchBytes-total {
 				break
 			}
@@ -488,5 +595,5 @@ func (w *Worker) selectLocal(after string) ([]string, string, error) {
 		paths = append(paths, r.Path)
 		next = r.Path
 	}
-	return paths, next, nil
+	return paths, next, attention
 }

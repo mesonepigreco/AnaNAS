@@ -63,8 +63,13 @@ func PrepareUpload(ctx context.Context, db *index.DB, root *content.Root, c *jou
 			return nil, nil, index.ErrStale
 		}
 		if !r.Missing && os.FileMode(r.Fingerprint.Mode).IsRegular() {
-			if r.Fingerprint.Size < 0 || r.Fingerprint.Size > o.MaxFileBytes || r.Fingerprint.Size > o.MaxBatchBytes-total {
-				return nil, nil, fmt.Errorf("selected upload exceeds content limit")
+			if r.Fingerprint.Size < 0 || r.Fingerprint.Size > o.MaxFileBytes {
+				return nil, nil, &localPathError{path, r.Generation, fmt.Errorf("%w: selected file exceeds content limit", ErrAttention)}
+			}
+			if r.Fingerprint.Size > o.MaxBatchBytes-total {
+				// Observation can grow a file after selection. Start a fresh
+				// bounded selection rather than permanently halting the worker.
+				return nil, nil, fmt.Errorf("%w: selected batch grew beyond content limit", index.ErrStale)
 			}
 			total += r.Fingerprint.Size
 		}
@@ -85,7 +90,7 @@ func PrepareUpload(ctx context.Context, db *index.DB, root *content.Root, c *jou
 		comparison, err := Compare(ctx, db, root, c, remote, path, ComparisonOptions{Namespace: namespace, Exclusions: o.Exclusions, MaxFileBytes: o.MaxFileBytes, ReadBytesPerSecond: o.ReadBytesPerSecond, Gate: o.Gate})
 		results[i] = comparison
 		if err != nil {
-			return nil, results, err
+			return nil, results, &localPathError{path, comparison.Generation, err}
 		}
 		if comparison.Decision.Action != diff.Push {
 			continue
@@ -114,7 +119,7 @@ func PrepareUpload(ctx context.Context, db *index.DB, root *content.Root, c *jou
 				return nil, results, index.ErrStale
 			}
 			if !base.Tombstone && !comparison.Local.Content.Tombstone && base.Directory != comparison.Local.Content.Directory {
-				return nil, results, fmt.Errorf("type change requires prior explicit deletion")
+				return nil, results, &localPathError{path, comparison.Generation, fmt.Errorf("%w: type change requires prior explicit deletion", ErrAttention)}
 			}
 		}
 		p.Sources = append(p.Sources, index.UploadSource{Path: path, Expected: expected, ID: comparison.Local.Content.ID, Generation: comparison.Generation, Fingerprint: r.Fingerprint, Missing: r.Missing})
@@ -127,7 +132,12 @@ func PrepareUpload(ctx context.Context, db *index.DB, root *content.Root, c *jou
 	if err := p.Validate(); err != nil {
 		return nil, results, err
 	}
-	check := func(i int) error {
+	check := func(i int) (err error) {
+		defer func() {
+			if err != nil {
+				err = &localPathError{p.Sources[i].Path, p.Sources[i].Generation, err}
+			}
+		}()
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -198,10 +208,10 @@ func PrepareUpload(ctx context.Context, db *index.DB, root *content.Root, c *jou
 			if !m.Directory && !m.Tombstone {
 				snapshot, err := root.SnapshotAs(ctx, s.Path, s.Fingerprint, store, s.ID, o.ReadBytesPerSecond)
 				if err != nil {
-					return u, err
+					return u, &localPathError{s.Path, s.Generation, err}
 				}
 				if !reflect.DeepEqual(snapshot.Manifest, selected[i].Local) {
-					return u, content.ErrChanged
+					return u, &localPathError{s.Path, s.Generation, content.ErrChanged}
 				}
 				v = snapshot.Version
 				if err := check(i); err != nil {

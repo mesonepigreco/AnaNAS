@@ -99,6 +99,27 @@ class Client:
         finally:
             conn.close()
 
+    def pending_files(self, after=""):
+        return self.pending_request("GET", "/api/pending?" + urllib.parse.urlencode({"after": after}))
+
+    def confirm_sync(self, path=None, generation=None, all_files=False):
+        value = {"all": True} if all_files else {"path": path, "generation": generation}
+        return self.pending_request("POST", "/api/confirm-sync", value)
+
+    def pending_request(self, method, path, value=None):
+        token = self.token()
+        conn = self.connection()
+        try:
+            conn.request(method, path, None if value is None else json.dumps(value),
+                         {"X-Nas-Sync-CSRF": token, "Content-Type": "application/json"})
+            response = conn.getresponse()
+            data = response.read(2 * 1024 * 1024 + 1)
+            if response.status != 200 or len(data) > 2 * 1024 * 1024:
+                raise ValueError("Pending sync request failed; refresh and try again")
+            return json.loads(data)
+        finally:
+            conn.close()
+
     def storage(self, path=""):
         token = self.token()
         conn = self.connection()
@@ -287,6 +308,21 @@ class Indicator:
             self.last_title = title
             self.bus.emit_signal(None, "/StatusNotifierItem", ITEM, "NewTitle", None)
 
+    @staticmethod
+    def menu_text(value, limit=72):
+        # DBusMenu labels do not wrap in GNOME. Bound every label, including
+        # recent paths, and keep embedded newlines out of menu rows.
+        text = " ".join(str(value).split())
+        return text if len(text) <= limit else text[:limit - 1] + "…"
+
+    def sync_summary(self):
+        reason = self.state.get("syncReason", "running")
+        if reason.startswith("Eligible files synced; some paths need attention"):
+            return "Synced eligible files · some paths need attention"
+        if reason.startswith("Synchronization needs attention"):
+            return "Synchronization needs attention"
+        return self.menu_text(reason, 60)
+
     def summary(self):
         if not self.configured:
             return "anaNAS — setup required"
@@ -296,7 +332,7 @@ class Indicator:
             return "anaNAS — paused"
         if not self.state.get("automaticWrites"):
             return "anaNAS — transfers disabled"
-        return "anaNAS — " + self.state.get("syncReason", "running")
+        return "anaNAS — " + self.sync_summary()
 
     def icon(self):
         return "ananas-symbolic"
@@ -332,6 +368,10 @@ class Indicator:
             f"Since daemon start: ↑ {size(state.get('uploadBytes'))}  ↓ {size(state.get('downloadBytes'))}")
         problem = self.error or self.action_error
         reason = f"Problem: {problem}" if problem else state.get("syncReason", "")
+        if not problem and reason.startswith("Eligible files synced; some paths need attention"):
+            reason = "Open Control panel → Pending files for details"
+        elif not problem and len(reason) > 72:
+            reason = "Open Control panel for full status details"
         if not self.configured:
             reason = "Choose Set up QNAP to connect your NAS and select a local folder."
         count = state.get("updatedLast24Hours")
@@ -350,7 +390,7 @@ class Indicator:
             21: ("Set up QNAP…" if self.error or not state.get("automaticWrites") else "Manage sync folders…", True),
             7: ("Refresh daemon status", self.configured and not self.busy),
         })
-        return menu
+        return {key: (self.menu_text(label), enabled) for key, (label, enabled) in menu.items()}
 
     @staticmethod
     def recent_label(update):
@@ -379,7 +419,7 @@ class Indicator:
             # menu. Use the already-published snapshot instead of rebuilding
             # the full menu for every synchronous D-Bus call.
             label, enabled = dict(self.last_menu)[item_id]
-            props = {"label": GLib.Variant("s", str(label)[:512]), "enabled": GLib.Variant("b", enabled),
+            props = {"label": GLib.Variant("s", self.menu_text(label)), "enabled": GLib.Variant("b", enabled),
                      "visible": GLib.Variant("b", self.item_visible(item_id))}
             if item_id == 8:
                 props["children-display"] = GLib.Variant("s", "submenu")

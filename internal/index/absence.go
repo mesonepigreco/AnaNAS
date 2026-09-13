@@ -50,3 +50,43 @@ func (d *DB) AcknowledgeAbsent(path string, generation uint64) (bool, error) {
 	})
 	return cleared && err == nil, err
 }
+
+// ClearUnsupportedAbsence retires an observed deletion of a name the protocol
+// cannot represent. Such a name could never have been uploaded. Unlike ordinary
+// tombstones, it needs no remote deletion; retained sync history prevents cleanup.
+func (d *DB) ClearUnsupportedAbsence(path string, generation uint64) (bool, error) {
+	if syncPath(path) == nil || generation == 0 {
+		return false, nil
+	}
+	cleared := false
+	err := d.db.Update(func(tx *bolt.Tx) error {
+		if tx.Bucket(bases).Get([]byte(path)) != nil || tx.Bucket(pathStates).Get([]byte(path)) != nil {
+			return nil
+		}
+		raw := tx.Bucket(files).Get([]byte(path))
+		if raw == nil {
+			return nil
+		}
+		var r Record
+		if err := json.Unmarshal(raw, &r); err != nil {
+			return err
+		}
+		if !r.Missing || !r.Dirty || r.Generation != generation {
+			return nil
+		}
+		r.Dirty = false
+		raw, err := json.Marshal(r)
+		if err != nil {
+			return err
+		}
+		if err := tx.Bucket(files).Put([]byte(path), raw); err != nil {
+			return err
+		}
+		if err := updateDirty(tx, r); err != nil {
+			return err
+		}
+		cleared = true
+		return nil
+	})
+	return cleared && err == nil, err
+}

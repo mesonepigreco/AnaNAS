@@ -58,7 +58,7 @@ type Server struct {
 	stopping   bool
 	requests   sync.WaitGroup
 	streamsMu  sync.Mutex
-	streams    map[string]bool
+	streams    map[string]*eventStream
 }
 type ApplyRequest struct {
 	Epoch    uint64           `json:"epoch"`
@@ -116,7 +116,7 @@ func New(c *journal.Coordinator, s *stage.Store, p journal.Publisher, o Options)
 	if err != nil {
 		return nil, err
 	}
-	return &Server{c: c, store: s, publisher: p, opts: o, exclusions: m, active: make(chan struct{}, 1), streams: make(map[string]bool)}, nil
+	return &Server{c: c, store: s, publisher: p, opts: o, exclusions: m, active: make(chan struct{}, 1), streams: make(map[string]*eventStream)}, nil
 }
 func (s *Server) allowedPath(path string, isDir bool) error {
 	if path == "." || len(path) > 4096 || !fs.ValidPath(path) || strings.ContainsAny(path, "\\\x00") {

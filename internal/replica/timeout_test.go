@@ -3,6 +3,8 @@ package replica
 import (
 	"context"
 	"fmt"
+	"net"
+	"syscall"
 	"testing"
 	"time"
 
@@ -26,5 +28,13 @@ func TestContentTimeoutScalesAndWorkerRetriesOnlyRecoverableErrors(t *testing.T)
 		if retryableWorkerError(err) {
 			t.Fatalf("non-recoverable error was retried: %v", err)
 		}
+	}
+	for _, err := range []error{syscall.ENOENT, syscall.EACCES, fmt.Errorf("publish file: %w", syscall.ENOENT)} {
+		if retryableWorkerError(err) {
+			t.Fatalf("permanent filesystem error retried: %v", err)
+		}
+	}
+	if !retryableWorkerError(&net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}) {
+		t.Fatal("connection failure no longer retried")
 	}
 }

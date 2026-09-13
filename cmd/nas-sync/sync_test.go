@@ -23,6 +23,7 @@ func TestStatusReasonDistinguishesObservationProgressFromFailures(t *testing.T) 
 		{"initial index", active, observe.Status{}, replica.WorkerStatus{}, "Preparing local file index; synchronization will start automatically"},
 		{"incremental index", active, observe.Status{Ready: true, Scanning: true}, replica.WorkerStatus{Phase: "suspended", LastError: "synchronization suspended: local observation is not ready"}, "Indexing local changes; synchronization will resume automatically"},
 		{"worker failure", active, observe.Status{Ready: true}, replica.WorkerStatus{Phase: "attention", LastError: "publication cache budget exhausted"}, "Synchronization needs attention: publication cache budget exhausted"},
+		{"isolated failures", active, observe.Status{Ready: true}, replica.WorkerStatus{Phase: "partial", LastError: "unsupported name"}, "Eligible files synced; some paths need attention: unsupported name"},
 		{"worker retry", active, observe.Status{Ready: true}, replica.WorkerStatus{Phase: "retrying", LastError: "connection reset"}, "Temporary synchronization problem; retrying automatically: connection reset"},
 		{"working", active, observe.Status{Ready: true}, replica.WorkerStatus{Phase: "working"}, "Synchronizing"},
 		{"idle", active, observe.Status{Ready: true}, replica.WorkerStatus{Phase: "idle"}, "LAN sync active"},

@@ -7,6 +7,29 @@ from gi.repository import Gio, GLib
 
 
 class IndicatorTests(unittest.TestCase):
+    def test_long_errors_and_paths_do_not_expand_menu_labels(self):
+        with patch('nas_sync_indicator.Gio.bus_own_name'):
+            indicator = Indicator(Client(8721), Path('/tmp/local'))
+        indicator.bus = Mock()
+        indicator.error = None
+        reason = 'Eligible files synced; some paths need attention: ' + 'long folder/' * 100
+        indicator.state = dict(paused=False, automaticWrites=True, syncReason=reason,
+                               recentUpdates=[dict(path='long folder/' * 100 + '\nfile', direction='to NAS')])
+        indicator.changed()
+        self.assertEqual(indicator.summary(), 'anaNAS — Synced eligible files · some paths need attention')
+        self.assertIn('Pending files', indicator.items()[3][0])
+        self.assertEqual(indicator.state['syncReason'], reason)
+        for key, (label, _) in indicator.items().items():
+            self.assertLessEqual(len(label), 72)
+            self.assertNotIn('\n', label)
+            self.assertLessEqual(len(indicator.properties(key, [])['label'].unpack()), 72)
+        self.assertTrue(indicator.items()[9][0].endswith('…'))
+        indicator.action_error = 'Failed\n' + 'x' * 2000
+        indicator.changed()
+        self.assertLessEqual(len(indicator.items()[3][0]), 72)
+        indicator.state['syncReason'] = 'Unexpected error ' * 100
+        self.assertLessEqual(len(indicator.summary()), 72)
+
     def test_unconfigured_installation_offers_setup_not_a_crash_message(self):
         with patch('nas_sync_indicator.Gio.bus_own_name'):
             indicator = Indicator(Client(8721), Path('/tmp/not-created'), configured=False)
@@ -133,7 +156,8 @@ class IndicatorTests(unittest.TestCase):
         self.assertIn('file manager could not open', indicator.items()[3][0])
         self.assertNotIn('pygi-error', indicator.items()[3][0])
         self.assertNotIn('launch failed', indicator.items()[3][0])
-        self.assertIn('/tmp/local', indicator.items()[3][0])
+        self.assertIn('/tmp/local', indicator.action_error)
+        self.assertLessEqual(len(indicator.items()[3][0]), 72)
         notification = indicator.bus.call.call_args.args[4].unpack()[4]
         self.assertEqual(notification, indicator.action_error)
         # A subsequent stream delivery must not erase the action error.

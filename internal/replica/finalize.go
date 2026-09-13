@@ -112,7 +112,7 @@ func FinishUpload(ctx context.Context, db *index.DB, c *journal.Coordinator, sto
 			}
 			m, err := retainedManifest(ctx, store, e.Next, pace)
 			if err != nil {
-				return err
+				return fmt.Errorf("upload snapshot for %q: %w", e.Path, err)
 			}
 			manifests[i] = m
 		}

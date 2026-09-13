@@ -66,6 +66,17 @@ func (e *RemoteError) Error() string {
 	return fmt.Sprintf("NAS protocol status %d: %s", e.Status, e.Message)
 }
 
+// Retryable identifies temporary service failures without treating rejected
+// credentials, conflicts, malformed input or missing versions as retry loops.
+func (e *RemoteError) Retryable() bool {
+	switch e.Status {
+	case 408, 429, 500, 502, 503, 504:
+		return true
+	default:
+		return false
+	}
+}
+
 type Client struct {
 	opts             ClientOptions
 	exclusions       *exclude.Matcher

@@ -235,7 +235,7 @@ func runApplication(ctx context.Context, cfg *config.Config, once, identity bool
 		return err
 	}
 	storage := &storageView{cfg: cfg.NAS, db: db}
-	statusServer, err := web.NewWithDetails(cfg.WebPort, func() any {
+	statusServer, err := web.NewWithPending(cfg.WebPort, func() any {
 		status := observer.Status()
 		reason := "NAS transfers disabled: synchronization engine and safety validation are incomplete."
 		var uploaded, downloaded uint64
@@ -263,7 +263,18 @@ func runApplication(ctx context.Context, cfg *config.Config, once, identity bool
 			Limits          config.Limits        `json:"limits"`
 			Traffic         traffic.Summary      `json:"traffic"`
 		}{Status: status, Paused: controls.Paused(), AutomaticWrites: live != nil, SyncReason: reason, UploadBytes: uploaded, DownloadBytes: downloaded, Updated24Hours: activity.UpdatedLast24Hours, RecentUpdates: activity.Recent, CPULimitPercent: cpuPercent(governor), NAS: cfg.NAS, Limits: cfg.Limits, Traffic: trafficHistory.Summary(time.Now())}
-	}, controls.SetPaused, storage.snapshot)
+	}, controls.SetPaused, storage.snapshot, func(ctx context.Context, after string) (any, error) {
+		return db.PendingSync(ctx, after, cfg.Sync.MaxFileBytes)
+	}, func(ctx context.Context, request index.SyncConfirmation) (index.ConfirmationResult, error) {
+		if live == nil {
+			return index.ConfirmationResult{}, fmt.Errorf("synchronization is disabled")
+		}
+		result, err := db.ConfirmSync(ctx, request, cfg.Sync.MaxFileBytes)
+		if err == nil {
+			live.worker.RequestSync()
+		}
+		return result, err
+	})
 	if err != nil {
 		return fmt.Errorf("start local status UI: %w", err)
 	}

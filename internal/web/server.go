@@ -56,6 +56,10 @@ func NewWithControl(port int, snapshot Snapshot, pause PauseControl) (*Server, e
 type Details func(context.Context, string) (any, error)
 
 func NewWithDetails(port int, snapshot Snapshot, pause PauseControl, details Details) (*Server, error) {
+	return NewWithPending(port, snapshot, pause, details, nil, nil)
+}
+
+func NewWithPending(port int, snapshot Snapshot, pause PauseControl, details Details, pending Details, confirm ConfirmControl) (*Server, error) {
 	if port < 0 || port > 65535 {
 		return nil, fmt.Errorf("web port out of range")
 	}
@@ -76,6 +80,10 @@ func NewWithDetails(port int, snapshot Snapshot, pause PauseControl, details Det
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", indexHandler(token, pause != nil))
 	mux.HandleFunc("/api/status", statusHandler(snapshot))
+	if pending != nil && confirm != nil {
+		mux.HandleFunc("/api/pending", pendingHandler(token, pending))
+		mux.HandleFunc("/api/confirm-sync", confirmHandler(token, confirm))
+	}
 	if details != nil {
 		mux.HandleFunc("/api/storage", func(w http.ResponseWriter, r *http.Request) {
 			if !methodAllowed(w, r) {

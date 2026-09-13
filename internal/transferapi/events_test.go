@@ -45,13 +45,6 @@ func TestTLSNotificationsCoalesceRemainIdleAndReconnect(t *testing.T) {
 	if err := c.WatchChanges(ctx, hints); err == nil {
 		t.Fatal("second client stream accepted")
 	}
-	duplicate := newTestClient(t, clientOptions(f))
-	err := duplicate.WatchChanges(ctx, make(chan struct{}, 1))
-	var remote *RemoteError
-	if !errors.As(err, &remote) || remote.Status != http.StatusServiceUnavailable {
-		t.Fatal("same identity opened another stream", err)
-	}
-	duplicate.Close()
 	// A transfer on the same Client must work while its event connection waits.
 	data := []byte("notification fixture")
 	wire := encoded(t, nil, data)
@@ -106,6 +99,34 @@ func TestTLSNotificationsCoalesceRemainIdleAndReconnect(t *testing.T) {
 	if err := eventJoined(t, done); err == nil {
 		t.Fatal("Close left notification stream open")
 	}
+}
+
+func TestNotificationReconnectReplacesAbandonedStream(t *testing.T) {
+	f := setup(t, true, nil)
+	f.api.opts.MaxEventStreams = 1
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var previous <-chan error
+	for i := 0; i < 4; i++ {
+		c := newTestClient(t, clientOptions(f))
+		hints, done := make(chan struct{}, 1), make(chan error, 1)
+		go func() { done <- c.WatchChanges(ctx, hints) }()
+		eventAwait(t, hints)
+		if previous != nil {
+			if err := eventJoined(t, previous); err == nil {
+				t.Fatal("replaced stream did not close")
+			}
+		}
+		f.api.streamsMu.Lock()
+		n := len(f.api.streams)
+		f.api.streamsMu.Unlock()
+		if n != 1 {
+			t.Fatalf("old cleanup removed replacement: %d streams", n)
+		}
+		previous = done
+	}
+	cancel()
+	eventJoined(t, previous)
 }
 
 func TestNotificationGateRefusalMakesNoConnection(t *testing.T) {

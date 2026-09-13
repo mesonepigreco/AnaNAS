@@ -150,6 +150,54 @@ func TestFinishDownloadAllExcludedNeedsNoPublication(t *testing.T) {
 	}
 }
 
+func TestAlreadyDeletedFileDoesNotBlockLaterRemoteUpdates(t *testing.T) {
+	f := setup(t)
+	db, first := downloadInbox(t, f, false)
+	defer db.Close()
+	ctx := context.Background()
+	if _, err := f.puller.Pull(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := FinishDownload(ctx, db, f.c, f.store, id("remote namespace"), completionOptions()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(f.root, "file")); err != nil {
+		t.Fatal(err)
+	}
+	deleted := journal.Proposal{ID: id("simultaneous-delete"), Client: first.Client, Entries: []journal.Entry{{Path: "file", Expected: first.Entries[0].Next.ID, Next: journal.Version{ID: id("tombstone"), Tombstone: true}}}}
+	next := f.proposal("after-deletion", "next-file", "", []byte("new content after deletion"))
+	priorState, err := db.RemoteState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := changefeed.Filter(id("remote namespace"), nil, changefeed.Request{Namespace: priorState.Namespace, Policy: priorState.Policy, After: 1, Limit: 2}, []journal.Record{{Proposal: deleted, Sequence: 2, Epoch: 1, Committed: true}, {Proposal: next, Sequence: 3, Epoch: 1, Committed: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReceiveRemotePage(page); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []journal.Proposal{deleted, next} {
+		if _, err := f.puller.Pull(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+		if err := FinishDownload(ctx, db, f.c, f.store, id("remote namespace"), completionOptions()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state, err := db.RemoteState()
+	if err != nil || state.Completed != 3 {
+		t.Fatal(state, err)
+	}
+	if f.remote.calls != 2 {
+		t.Fatal("deletion performed unexpected download", f.remote.calls)
+	}
+	data, err := os.ReadFile(filepath.Join(f.root, "next-file"))
+	if err != nil || string(data) != "new content after deletion" {
+		t.Fatal(string(data), err)
+	}
+}
+
 func TestFinishDownloadDirectoryAndDeletion(t *testing.T) {
 	f := setup(t)
 	db, err := index.Open(filepath.Join(f.state, "index.db"), f.root)
