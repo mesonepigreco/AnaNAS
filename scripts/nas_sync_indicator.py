@@ -16,7 +16,12 @@ import signal
 import threading
 import urllib.parse
 
-from gi.repository import Gio, GLib, GLibUnix
+from gi.repository import Gio, GLib
+try:
+    from gi.repository import GLibUnix
+    unix_signal_add = GLibUnix.signal_add
+except ImportError:  # GLib before 2.80 keeps the Unix helpers in GLib itself.
+    unix_signal_add = GLib.unix_signal_add
 
 
 ITEM = "org.kde.StatusNotifierItem"
@@ -632,8 +637,8 @@ class Indicator:
         return False
 
     def run(self):
-        GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, self.quit)
-        GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, self.quit)
+        unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, self.quit)
+        unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, self.quit)
         self.loop.run()
         self.stop.set()
         if self.watch_id:
