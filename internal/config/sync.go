@@ -36,13 +36,17 @@ func (s Sync) validate(c *Config) error {
 	if err != nil || !ip.Is4() || !ip.IsPrivate() {
 		return fmt.Errorf("sync requires a private IPv4 NAS literal")
 	}
-	source, err := netip.ParseAddr(s.Source)
-	if err != nil || !source.Is4() || !source.IsPrivate() || source == ip {
-		return fmt.Errorf("sync requires a distinct private IPv4 source")
-	}
 	prefix, err := netip.ParsePrefix(c.NAS.Prefix)
-	if err != nil || !prefix.Addr().Is4() || prefix != prefix.Masked() || !prefix.Contains(ip) || !prefix.Contains(source) || c.NAS.Interface == "" {
+	if err != nil || !prefix.Addr().Is4() || prefix != prefix.Masked() || !prefix.Contains(ip) || c.NAS.Interface == "" {
 		return fmt.Errorf("sync requires an explicit interface and matching direct subnet")
+	}
+	// An empty source follows the interface's current address in the prefix,
+	// so a DHCP lease change does not take synchronization offline.
+	if s.Source != "" {
+		source, err := netip.ParseAddr(s.Source)
+		if err != nil || !source.Is4() || !source.IsPrivate() || source == ip || !prefix.Contains(source) {
+			return fmt.Errorf("sync requires a distinct private IPv4 source in the direct subnet")
+		}
 	}
 	if s.Port < 1024 || s.Port > 65535 || s.MaxFileBytes < 1 || s.MaxFileBytes > 8<<30 || s.MaxBatchBytes < s.MaxFileBytes || s.MaxBatchBytes > 8<<30 || s.MaxCacheEntries < 1 || s.MaxCacheEntries > 1_000_000 {
 		return fmt.Errorf("sync requires bounded port, file, batch and cache entry settings")

@@ -42,8 +42,9 @@ func (o launchOptions) validate() error {
 	if err != nil || !prefix.Addr().Is4() || prefix != prefix.Masked() || !prefix.Contains(endpoint.Addr()) {
 		return fmt.Errorf("matching IPv4 prefix required")
 	}
-	peer, err := netip.ParseAddr(o.peer)
-	if err != nil || !peer.Is4() || !prefix.Contains(peer) || peer.IsLoopback() != endpoint.Addr().IsLoopback() || (!peer.IsPrivate() && !peer.IsLoopback()) {
+	peers, err := helper.ParsePeer(o.peer)
+	peer := peers.Addr()
+	if err != nil || !peer.Is4() || !prefix.Contains(peer) || peers.Bits() < prefix.Bits() || peer.IsLoopback() != endpoint.Addr().IsLoopback() || (!peer.IsPrivate() && !peer.IsLoopback()) {
 		return fmt.Errorf("explicit same-subnet peer required")
 	}
 	if o.device == "" || len(o.device) > 15 || strings.ContainsAny(o.device, "/\\\x00 \t\r\n") || (endpoint.Addr().IsLoopback() != (o.device == "lo")) {
@@ -65,7 +66,7 @@ func main() {
 	flag.StringVar(&o.listen, "listen", "", "specific private IPv4 address:port")
 	flag.StringVar(&o.device, "interface", "", "physical device (lo only for local tests)")
 	flag.StringVar(&o.prefix, "prefix", "", "direct IPv4 subnet")
-	flag.StringVar(&o.peer, "peer", "", "explicit directly connected client IPv4")
+	flag.StringVar(&o.peer, "peer", "", "explicit directly connected client IPv4 or client subnet (DHCP)")
 	flag.IntVar(&o.uid, "uid", -1, "dedicated helper UID")
 	flag.IntVar(&o.gid, "gid", -1, "dedicated helper GID and sole supplementary group")
 	flag.BoolVar(&o.write, "write-test", false, "disposable-only write test")

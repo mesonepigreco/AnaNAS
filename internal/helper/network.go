@@ -136,9 +136,15 @@ func CheckNetwork(ctx context.Context, c Config) error {
 		peers = []string{peer.String()}
 	}
 	for _, peer := range peers {
-		address, err := netip.ParseAddr(peer)
-		if err != nil || !address.Is4() || !prefix.Contains(address) {
+		p, err := ParsePeer(peer)
+		address := p.Addr()
+		if err != nil || !address.Is4() || !prefix.Contains(address) || p.Bits() < prefix.Bits() {
 			return fmt.Errorf("peer is outside the direct subnet")
+		}
+		if !p.IsSingleIP() {
+			// A subnet has no single route to prove before a client connects;
+			// each accepted connection repeats this check for its actual address.
+			continue
 		}
 		if err := directRoute(ctx, endpoint.Addr(), address, nic.Index, loopback); err != nil {
 			return err

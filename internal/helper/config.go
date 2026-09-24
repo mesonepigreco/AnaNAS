@@ -83,13 +83,15 @@ func (c Config) Validate() error {
 	if len(c.Peers) < 1 || len(c.Peers) > 64 {
 		return fmt.Errorf("one to 64 explicit peers required")
 	}
-	seen := make(map[netip.Addr]bool, len(c.Peers))
+	seen := make(map[netip.Prefix]bool, len(c.Peers))
 	for _, peer := range c.Peers {
-		addr, err := netip.ParseAddr(peer)
-		if err != nil || !addr.Is4() || !prefix.Contains(addr) || addr.IsLoopback() != endpoint.Addr().IsLoopback() || (!addr.IsPrivate() && !addr.IsLoopback()) || seen[addr] {
+		// A peer is one address or a subnet inside the direct prefix.
+		p, err := ParsePeer(peer)
+		addr := p.Addr()
+		if err != nil || !addr.Is4() || !prefix.Contains(addr) || p.Bits() < prefix.Bits() || addr.IsLoopback() != endpoint.Addr().IsLoopback() || (!addr.IsPrivate() && !addr.IsLoopback()) || seen[p] {
 			return fmt.Errorf("invalid, duplicate or off-prefix peer")
 		}
-		seen[addr] = true
+		seen[p] = true
 	}
 	if len(c.Clients) < 1 || len(c.Clients) > 64 {
 		return fmt.Errorf("bounded client certificate allowlist required")

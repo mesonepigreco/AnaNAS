@@ -61,7 +61,13 @@ these reservations from a physical disk quota. The QNAP runs below predate this
 change and do not validate budget exhaustion or restart.
 
 The service uses TLS 1.3, a private client CA and leaf-certificate allowlist. The
-PC also pins the server certificate and binds its source address/interface. Local
+PC also pins the server certificate and binds its source address/interface. With
+`sync.source` omitted, the source is the single address the interface currently
+holds in `nas.prefix`, re-read before every check and dial so a DHCP lease change
+does not take sync offline. Helper `peers` (and launcher `-peer`) accept either
+one address or a canonical subnet inside the direct prefix; a subnet authorizes a
+DHCP client while each accepted connection is still route-checked for its actual
+address and authenticated by its certificate pin. Local
 netlink checks require the configured address/prefix, physical carrier and direct
 route without a gateway, multipath or alternate interface. Checks run at startup
 and application gates, without DNS, ping, directory scanning or idle polling.

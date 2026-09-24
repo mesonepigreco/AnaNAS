@@ -621,13 +621,15 @@ def _install(session, inventory, plan, progress):
     identity = json.loads(run([str(binary), "-config", str(config_path), "-client-identity"]))["clientID"]
     pins = certificates(tls, session.host, session.route["source"])
     namespace = secrets.token_hex(32)
-    config["sync"] = {"enabled": True, "port": plan["port"], "source": session.route["source"],
+    # No fixed "source": the daemon follows the PC's current DHCP address, and the
+    # NAS accepts the whole direct subnet; the client certificate pin authenticates.
+    config["sync"] = {"enabled": True, "port": plan["port"],
                       "namespace": namespace, "replicaNamespace": secrets.token_hex(32),
                       "certificate": str(tls / "client.pem"), "privateKey": str(tls / "client.key"), "ca": str(tls / "ca.pem"),
                       "serverFingerprint": pins["server"], "maxFileBytes": 8589934592, "maxBatchBytes": 8589934592, "maxCacheEntries": 1000000}
     nas = {"liveWrites": True, "root": root, "stateDir": base + "/state", "observerStateDir": base + "/observer",
            "namespace": namespace, "listen": f"{session.host}:{plan['port']}", "interface": device, "prefix": session.route["prefix"],
-           "peers": [session.route["source"]], "uid": account["uid"], "gid": account["gid"], "groups": [account["gid"]],
+           "peers": [session.route["prefix"]], "uid": account["uid"], "gid": account["gid"], "groups": [account["gid"]],
            "certificate": base + "/server.pem", "privateKey": base + "/server.key", "clientCA": base + "/ca.pem",
            "clients": {pins["client"]: identity}, "exclusions": ["@Recycle/"], "maxConnections": 2,
            "maxFileBytes": 8589934592, "maxBatchBytes": 8589934592, "maxCacheBytes": 1099511627776,
@@ -639,7 +641,7 @@ def _install(session, inventory, plan, progress):
     if plan["createFolder"]:
         session.command("set -eu; mkdir " + q(root) + "; chown " + f"{account['uid']}:{account['gid']} " + q(root), admin=True)
     launch = shlex.join(["-helper", base + "/helper", "-config", base + "/helper.json", "-listen", nas["listen"],
-                        "-interface", device, "-prefix", session.route["prefix"], "-peer", session.route["source"],
+                        "-interface", device, "-prefix", session.route["prefix"], "-peer", session.route["prefix"],
                         "-uid", str(account["uid"]), "-gid", str(account["gid"])])
     # Device-bound sockets and explicit peer filtering remain enforced by the
     # helper. Only this fresh instance's dedicated port receives firewall rules.
@@ -650,7 +652,7 @@ case "${{1:-}}" in
 start)
  if ! /sbin/iptables -nL {chain} >/dev/null 2>&1; then
   /sbin/iptables -N {chain}
-  /sbin/iptables -A {chain} -s {session.route['source']} -i {device} -j ACCEPT
+  /sbin/iptables -A {chain} -s {session.route['prefix']} -i {device} -j ACCEPT
   /sbin/iptables -A {chain} -j DROP
   /sbin/iptables -I INPUT 1 -p tcp --dport {plan['port']} -j {chain}
  fi

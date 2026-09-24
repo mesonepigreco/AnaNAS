@@ -7,7 +7,7 @@ from ananas_mount import valid_lan
 
 
 class LANMountPolicy(unittest.TestCase):
-    def test_only_the_configured_direct_physical_address(self):
+    def test_only_a_current_direct_physical_address(self):
         interface = [{"ifname": "enp1s0", "operstate": "UP", "flags": ["UP", "LOWER_UP"],
                       "addr_info": [{"family": "inet", "local": "10.23.42.17", "prefixlen": 24}]}]
         route = [{"dev": "enp1s0", "prefsrc": "10.23.42.17"}]
@@ -20,6 +20,12 @@ class LANMountPolicy(unittest.TestCase):
                 changed[0][field] = value
                 self.assertFalse(valid_lan(interface, changed, connected))
         self.assertFalse(valid_lan(interface, route, []))
+        renewed = copy.deepcopy(interface)
+        renewed[0]["addr_info"][0]["local"] = "10.23.42.21"
+        self.assertTrue(valid_lan(renewed, [{"dev": "enp1s0", "prefsrc": "10.23.42.21"}], connected))
+        outside = copy.deepcopy(interface)
+        outside[0]["addr_info"][0]["local"] = "10.23.43.21"
+        self.assertFalse(valid_lan(outside, [{"dev": "enp1s0", "prefsrc": "10.23.43.21"}], connected))
         self.assertFalse(valid_lan(interface, route + route, connected))
         for flags in (["UP"], ["UP", "LOWER_UP", "POINTOPOINT"]):
             changed = copy.deepcopy(interface)

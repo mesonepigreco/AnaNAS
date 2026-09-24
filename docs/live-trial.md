@@ -14,6 +14,14 @@ also exercised. After source-failure isolation was deployed, eligible work
 continued past unsupported names; deleting an unsupported, never-synchronized
 file cleared its stale pending entry. Retained history was preserved.
 
+A DHCP lease change on the PC previously took sync offline because the PC source,
+mount check, NAS helper peer list and NAS firewall each pinned the old address.
+After the fix, the daemon follows the interface's current address in the direct
+prefix and the NAS helper, launcher and firewall authorize that prefix. The
+deployed QNAP helper was updated in place with backups. The share remounted
+automatically on the new address, the daemon reconnected and the queued backlog
+synchronized.
+
 The desktop panel was checked for folder/terminal actions, pending-file
 confirmation, automatic refresh and complete wrapped status details. Indicator
 errors and paths use compact menu labels. Closing a panel hides its persistent

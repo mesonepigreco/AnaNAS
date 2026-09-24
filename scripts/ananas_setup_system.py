@@ -57,14 +57,16 @@ def private_new(path, data, mode=0o600):
 def direct_lan(plan):
     expected = plan["route"]
     route = json.loads(execute(["ip", "-j", "-4", "route", "get", plan["host"]]))
-    if len(route) != 1 or route[0].get("gateway") or route[0].get("via") or route[0].get("dev") != expected["interface"] or route[0].get("prefsrc") != expected["source"]:
+    prefix = ipaddress.IPv4Network(expected["prefix"])
+    # The PC address may change with DHCP; require only that the route uses an
+    # address this interface currently holds inside the configured direct subnet.
+    if len(route) != 1 or route[0].get("gateway") or route[0].get("via") or route[0].get("dev") != expected["interface"] or ipaddress.IPv4Address(route[0].get("prefsrc", "0.0.0.0")) not in prefix:
         raise ValueError("configured direct LAN is unavailable")
     path = Path("/sys/class/net") / expected["interface"]
     if not (path / "device").exists() or "/virtual/" in str(path.resolve()):
         raise ValueError("physical LAN required")
     addresses = json.loads(execute(["ip", "-j", "-4", "address", "show", "dev", expected["interface"]]))
-    prefix = ipaddress.IPv4Network(expected["prefix"])
-    if len(addresses) != 1 or not any(a.get("local") == expected["source"] and a.get("prefixlen") == prefix.prefixlen for a in addresses[0].get("addr_info", [])):
+    if len(addresses) != 1 or not any(a.get("local") == route[0]["prefsrc"] and a.get("prefixlen") == prefix.prefixlen for a in addresses[0].get("addr_info", [])):
         raise ValueError("LAN prefix changed")
 
 

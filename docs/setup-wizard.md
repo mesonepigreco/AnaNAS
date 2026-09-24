@@ -127,8 +127,11 @@ wizard does not invoke them.
 - Settings beyond root/runtime-account selection use the generated JSON profile;
   there is not yet a graphical exclusion editor, batch folder selection, password
   rotation, certificate renewal UI, or automatic partial-install recovery.
-- Helper certificates expire after one year. DHCP/IP/interface changes require
-  configuration maintenance; setup deliberately pins direct-LAN endpoints.
+- Helper certificates expire after one year. The PC address may change with
+  DHCP: the daemon omits `sync.source` and follows the interface's current
+  address in the direct prefix, and the NAS helper, launcher `-peer` and iptables
+  rule authorize that prefix rather than one lease. NAS address, interface or
+  subnet changes still require configuration maintenance.
 - Engine limitations still apply: 8 GiB file/batch cap, unfinished general
   directory deletion, conflict choices and broader reconciliation acceptance.
 - Automated checks cover QNAP-only identity filtering, friendly connection-error

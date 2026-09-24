@@ -33,9 +33,12 @@ import (
 )
 
 type ClientOptions struct {
-	Namespace                   string
-	Endpoint                    netip.AddrPort
-	Source                      netip.Addr
+	Namespace string
+	Endpoint  netip.AddrPort
+	Source    netip.Addr
+	// SourceFunc supplies the current source address when Source is unset,
+	// for a DHCP-addressed PC. It is called before every dial.
+	SourceFunc                  func() (netip.Addr, error)
 	Interface                   string
 	Roots                       *x509.CertPool
 	Certificate                 tls.Certificate
@@ -102,8 +105,19 @@ func NewClient(o ClientOptions) (*Client, error) {
 	if !o.Endpoint.IsValid() || o.Endpoint.Port() == 0 || !o.Endpoint.Addr().Is4() || (!o.Endpoint.Addr().IsPrivate() && !o.Endpoint.Addr().IsLoopback()) {
 		return nil, fmt.Errorf("private IPv4 endpoint literal required")
 	}
-	if !o.Source.Is4() || (!o.Source.IsPrivate() && !o.Source.IsLoopback()) || o.Source.IsLoopback() != o.Endpoint.Addr().IsLoopback() {
-		return nil, fmt.Errorf("matching IPv4 source address required")
+	validSource := func(source netip.Addr) error {
+		if !source.Is4() || (!source.IsPrivate() && !source.IsLoopback()) || source.IsLoopback() != o.Endpoint.Addr().IsLoopback() {
+			return fmt.Errorf("matching IPv4 source address required")
+		}
+		return nil
+	}
+	if o.Source.IsValid() == (o.SourceFunc != nil) {
+		return nil, fmt.Errorf("exactly one fixed or current source address required")
+	}
+	if o.Source.IsValid() {
+		if err := validSource(o.Source); err != nil {
+			return nil, err
+		}
 	}
 	if o.Interface == "" || len(o.Interface) > 15 || strings.ContainsAny(o.Interface, "/\\\x00 \t\n") {
 		return nil, fmt.Errorf("explicit interface required")
@@ -129,7 +143,7 @@ func NewClient(o ClientOptions) (*Client, error) {
 	seconds := (o.MaxBatchBytes + (2 << 20) - 1) / (2 << 20)
 	operationTimeout := 45*time.Second + time.Duration(seconds*8)*time.Second
 	c := &Client{opts: o, exclusions: m, baseURL: "https://" + o.Endpoint.String(), changes: make(chan struct{}, 1), operationTimeout: operationTimeout}
-	dialer := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: -1, LocalAddr: &net.TCPAddr{IP: net.IP(o.Source.AsSlice())}, Control: func(network, address string, raw syscall.RawConn) error {
+	dialer := net.Dialer{Timeout: 5 * time.Second, KeepAlive: -1, Control: func(network, address string, raw syscall.RawConn) error {
 		if network != "tcp4" || address != o.Endpoint.String() {
 			return fmt.Errorf("unexpected dial destination")
 		}
@@ -156,7 +170,19 @@ func NewClient(o ClientOptions) (*Client, error) {
 		if err := o.Gate(ctx); err != nil {
 			return nil, err
 		}
-		conn, err := dialer.DialContext(ctx, "tcp4", address)
+		source := o.Source
+		if o.SourceFunc != nil {
+			var err error
+			if source, err = o.SourceFunc(); err != nil {
+				return nil, err
+			}
+			if err := validSource(source); err != nil {
+				return nil, err
+			}
+		}
+		bound := dialer
+		bound.LocalAddr = &net.TCPAddr{IP: net.IP(source.AsSlice())}
+		conn, err := bound.DialContext(ctx, "tcp4", address)
 		if err != nil {
 			return nil, err
 		}

@@ -163,14 +163,27 @@ func (s *Service) Serve(ctx context.Context, listener net.Listener) error {
 		return err
 	}
 	defer limited.Close()
-	peers := make(map[netip.Addr]bool, len(s.config.Peers))
+	peers := make([]netip.Prefix, 0, len(s.config.Peers))
 	for _, peer := range s.config.Peers {
-		peers[netip.MustParseAddr(peer)] = true
+		p, err := ParsePeer(peer)
+		if err != nil {
+			listener.Close()
+			return err
+		}
+		peers = append(peers, p)
+	}
+	allowed := func(address netip.Addr) bool {
+		for _, p := range peers {
+			if p.Contains(address) {
+				return true
+			}
+		}
+		return false
 	}
 	server := transferapi.HTTPServer(s.api)
 	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		peer, err := netip.ParseAddrPort(r.RemoteAddr)
-		if err != nil || !peers[peer.Addr()] {
+		if err != nil || !allowed(peer.Addr()) {
 			http.Error(w, "peer not allowed", http.StatusForbidden)
 			return
 		}

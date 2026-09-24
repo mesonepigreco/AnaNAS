@@ -50,9 +50,25 @@ func openSync(cfg *config.Config, state string, db *index.DB, observer *observe.
 	if err != nil {
 		return nil, err
 	}
-	source := netip.MustParseAddr(cfg.Sync.Source)
-	network := helper.Config{Listen: netip.AddrPortFrom(source, uint16(cfg.Sync.Port)).String(), Interface: cfg.NAS.Interface, Prefix: cfg.NAS.Prefix, Peers: []string{cfg.NAS.Host}}
+	// A fixed source is honored for older configurations; otherwise follow the
+	// interface's current DHCP address inside the direct subnet on every check.
+	var fixed netip.Addr
+	var current func() (netip.Addr, error)
+	if cfg.Sync.Source != "" {
+		fixed = netip.MustParseAddr(cfg.Sync.Source)
+	} else {
+		prefix := netip.MustParsePrefix(cfg.NAS.Prefix)
+		current = func() (netip.Addr, error) { return helper.InterfaceSource(cfg.NAS.Interface, prefix) }
+	}
 	gate := func(ctx context.Context) error {
+		source := fixed
+		if current != nil {
+			var e error
+			if source, e = current(); e != nil {
+				return e
+			}
+		}
+		network := helper.Config{Listen: netip.AddrPortFrom(source, uint16(cfg.Sync.Port)).String(), Interface: cfg.NAS.Interface, Prefix: cfg.NAS.Prefix, Peers: []string{cfg.NAS.Host}}
 		if err := helper.CheckNetwork(ctx, network); err != nil {
 			return err
 		}
@@ -71,7 +87,7 @@ func openSync(cfg *config.Config, state string, db *index.DB, observer *observe.
 		return ctx.Err()
 	}
 	exclusions := append(append([]string{}, cfg.Selective.ExcludeLocal...), cfg.Selective.ExcludeRemote...)
-	s.client, err = transferapi.NewClient(transferapi.ClientOptions{Namespace: cfg.Sync.Namespace, Endpoint: netip.AddrPortFrom(netip.MustParseAddr(cfg.NAS.Host), uint16(cfg.Sync.Port)), Source: source, Interface: cfg.NAS.Interface, Roots: ca, Certificate: certificate, ServerFingerprint: cfg.Sync.ServerFingerprint, ClientID: identity, Exclusions: exclusions, Writes: true, MaxFileBytes: cfg.Sync.MaxFileBytes, MaxBatchBytes: cfg.Sync.MaxBatchBytes, Gate: gate, RecordTraffic: recordTraffic})
+	s.client, err = transferapi.NewClient(transferapi.ClientOptions{Namespace: cfg.Sync.Namespace, Endpoint: netip.AddrPortFrom(netip.MustParseAddr(cfg.NAS.Host), uint16(cfg.Sync.Port)), Source: fixed, SourceFunc: current, Interface: cfg.NAS.Interface, Roots: ca, Certificate: certificate, ServerFingerprint: cfg.Sync.ServerFingerprint, ClientID: identity, Exclusions: exclusions, Writes: true, MaxFileBytes: cfg.Sync.MaxFileBytes, MaxBatchBytes: cfg.Sync.MaxBatchBytes, Gate: gate, RecordTraffic: recordTraffic})
 	if err != nil {
 		return nil, err
 	}

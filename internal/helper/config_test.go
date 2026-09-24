@@ -149,7 +149,7 @@ func TestHelperRejectsSymlinkConfigAndUnknownWriteSwitch(t *testing.T) {
 }
 
 func TestHelperRejectsUnsafeNetworkAndIdentityConfiguration(t *testing.T) {
-	for _, mode := range []string{"wildcard", "hostname", "public", "peer", "identity", "overlap"} {
+	for _, mode := range []string{"wildcard", "hostname", "public", "peer", "wide subnet", "noncanonical subnet", "duplicate subnet", "identity", "overlap"} {
 		t.Run(mode, func(t *testing.T) {
 			c := helperFixture(t).config
 			switch mode {
@@ -161,6 +161,12 @@ func TestHelperRejectsUnsafeNetworkAndIdentityConfiguration(t *testing.T) {
 				c.Listen = "8.8.8.8:9876"
 			case "peer":
 				c.Peers = []string{"10.23.42.17"}
+			case "wide subnet":
+				c.Peers = []string{"0.0.0.0/0"}
+			case "noncanonical subnet":
+				c.Peers = []string{"127.0.0.1/8"}
+			case "duplicate subnet":
+				c.Peers = []string{"127.0.0.0/8", "127.0.0.0/8"}
 			case "identity":
 				c.UID = 0
 			case "overlap":
@@ -170,6 +176,14 @@ func TestHelperRejectsUnsafeNetworkAndIdentityConfiguration(t *testing.T) {
 				t.Fatal("unsafe helper configuration accepted")
 			}
 		})
+	}
+}
+
+func TestHelperAcceptsDirectClientSubnet(t *testing.T) {
+	c := helperFixture(t).config
+	c.Peers = []string{"127.0.0.0/8"}
+	if err := c.Validate(); err != nil {
+		t.Fatal("direct client subnet rejected:", err)
 	}
 }
 

@@ -6,6 +6,7 @@ checks kernel mount metadata and lets mount.cifs use the existing root-only
 credential file. This program never opens or prints credential contents.
 """
 import argparse
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -14,7 +15,7 @@ import subprocess
 
 NAS = "10.23.42.30"
 DEVICE = "enp1s0"
-SOURCE = "10.23.42.17"
+PREFIX = "10.23.42.0/24"
 TARGET = "/mnt/nasdir"
 SHARE = "//10.23.42.30/Nasdir"
 
@@ -30,11 +31,14 @@ def valid_lan(interfaces, routes, connected):
     flags = set(interface.get("flags", []))
     if interface.get("ifname") != DEVICE or interface.get("operstate") != "UP" or not {"UP", "LOWER_UP"} <= flags or "POINTOPOINT" in flags:
         return False
-    if not any(a.get("family") == "inet" and a.get("local") == SOURCE and a.get("prefixlen") == 24 for a in interface.get("addr_info", [])):
+    # The PC address is DHCP-assigned: accept whichever address the interface
+    # currently holds in the direct subnet, provided the route to the NAS uses it.
+    prefix = ipaddress.IPv4Network(PREFIX)
+    held = {a.get("local") for a in interface.get("addr_info", [])
+            if a.get("family") == "inet" and a.get("prefixlen") == prefix.prefixlen and ipaddress.IPv4Address(a.get("local")) in prefix}
+    if route.get("dev") != DEVICE or route.get("prefsrc") not in held or route.get("gateway") or route.get("via") or route.get("type", "unicast") != "unicast":
         return False
-    if route.get("dev") != DEVICE or route.get("prefsrc") != SOURCE or route.get("gateway") or route.get("via") or route.get("type", "unicast") != "unicast":
-        return False
-    return any(r.get("dst") == "10.23.42.0/24" and r.get("dev") == DEVICE and r.get("scope") == "link" and not r.get("gateway") and not r.get("via") and r.get("type", "unicast") == "unicast" for r in connected)
+    return any(r.get("dst") == PREFIX and r.get("dev") == DEVICE and r.get("scope") == "link" and not r.get("gateway") and not r.get("via") and r.get("type", "unicast") == "unicast" for r in connected)
 
 
 def check_lan():

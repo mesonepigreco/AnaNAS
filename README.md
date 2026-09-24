@@ -131,11 +131,12 @@ For manual inspection or an advanced installation, start with
 | `webPort` | An unused local control-panel port; use a distinct port per profile |
 | `selectiveSync` | Local and remote exclusion patterns for your content |
 | `limits` | Resource and cache limits suitable for your PC and available storage |
-| `sync` | Provisioned helper endpoint, PC source IP, namespace identities, TLS paths, certificate pin and matching transfer limits |
+| `sync` | Provisioned helper endpoint, namespace identities, TLS paths, certificate pin and matching transfer limits. Omit `sync.source` so a DHCP-assigned PC address is followed automatically; set it only to pin a static address |
 
 The helper's native NAS path, interface, runtime UID/GID and TLS identities also
 need to match that NAS; [config.helper.example.json](config.helper.example.json)
-documents its fields. Keep helper state outside the synchronized data. The legacy
+documents its fields; `peers` may list the direct client subnet so the PC keeps
+access when DHCP changes its address. Keep helper state outside the synchronized data. The legacy
 `remote` SSH section is not the native content-sync transport. The wizard configures
 the native TLS transport automatically.
 

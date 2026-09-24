@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -99,6 +100,30 @@ func TestClientTLSRoundTrip(t *testing.T) {
 	}
 	if len(c.changes) != 1 {
 		t.Fatal("unbounded notifications")
+	}
+}
+
+func TestClientFollowsCurrentSourceAddress(t *testing.T) {
+	f := setup(t, true, nil)
+	o := clientOptions(f)
+	if _, err := NewClient(func() ClientOptions {
+		v := o
+		v.SourceFunc = func() (netip.Addr, error) { return v.Source, nil }
+		return v
+	}()); err == nil {
+		t.Fatal("fixed and current source accepted together")
+	}
+	calls := 0
+	o.Source = netip.Addr{}
+	o.SourceFunc = func() (netip.Addr, error) { calls++; return netip.MustParseAddr("127.0.0.1"), nil }
+	c := newTestClient(t, o)
+	if _, err := c.State(context.Background()); err != nil || calls == 0 {
+		t.Fatal(calls, err)
+	}
+	o.SourceFunc = func() (netip.Addr, error) { return netip.Addr{}, fmt.Errorf("no address") }
+	c = newTestClient(t, o)
+	if _, err := c.State(context.Background()); err == nil {
+		t.Fatal("missing current source accepted")
 	}
 }
 
