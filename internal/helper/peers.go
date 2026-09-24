@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 )
 
@@ -53,4 +54,38 @@ func InterfaceSource(device string, prefix netip.Prefix) (netip.Addr, error) {
 	default:
 		return netip.Addr{}, fmt.Errorf("permitted interface %s has several addresses in %s", device, prefix)
 	}
+}
+
+// CurrentAddressPort reports whether listen has the ":PORT" form, which means
+// the interface's current address in the direct prefix. It lets a DHCP-addressed
+// NAS keep serving after its address changes.
+func CurrentAddressPort(listen string) (uint16, bool) {
+	value, ok := strings.CutPrefix(listen, ":")
+	if !ok {
+		return 0, false
+	}
+	port, err := strconv.ParseUint(value, 10, 16)
+	if err != nil || port == 0 || strconv.FormatUint(port, 10) != value {
+		return 0, false
+	}
+	return uint16(port), true
+}
+
+// Resolved returns c with a ":PORT" listener replaced by the interface's
+// current address, so network checks and the inherited socket use it.
+func (c Config) Resolved() (Config, error) {
+	port, ok := CurrentAddressPort(c.Listen)
+	if !ok {
+		return c, nil
+	}
+	prefix, err := netip.ParsePrefix(c.Prefix)
+	if err != nil {
+		return c, err
+	}
+	address, err := InterfaceSource(c.Interface, prefix)
+	if err != nil {
+		return c, err
+	}
+	c.Listen = netip.AddrPortFrom(address, port).String()
+	return c, nil
 }

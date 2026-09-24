@@ -15,6 +15,7 @@ import (
 	"nas-sync/internal/index"
 	"nas-sync/internal/journal"
 	"nas-sync/internal/languard"
+	"nas-sync/internal/nasfind"
 	"nas-sync/internal/netwatch"
 	"nas-sync/internal/observe"
 	"nas-sync/internal/publish"
@@ -31,6 +32,8 @@ type syncRuntime struct {
 	root      *content.Root
 	publisher *publish.Publisher
 	network   daemon.NetworkOptions
+	locator   *nasfind.Locator
+	nas       func() config.NAS
 	mu        sync.Mutex
 	status    daemon.NetworkStatus
 }
@@ -52,23 +55,45 @@ func openSync(cfg *config.Config, state string, db *index.DB, observer *observe.
 	}
 	// A fixed source is honored for older configurations; otherwise follow the
 	// interface's current DHCP address inside the direct subnet on every check.
+	prefix := netip.MustParsePrefix(cfg.NAS.Prefix)
 	var fixed netip.Addr
 	var current func() (netip.Addr, error)
 	if cfg.Sync.Source != "" {
 		fixed = netip.MustParseAddr(cfg.Sync.Source)
 	} else {
-		prefix := netip.MustParsePrefix(cfg.NAS.Prefix)
 		current = func() (netip.Addr, error) { return helper.InterfaceSource(cfg.NAS.Interface, prefix) }
 	}
-	gate := func(ctx context.Context) error {
-		source := fixed
+	sourceNow := func() (netip.Addr, error) {
 		if current != nil {
-			var e error
-			if source, e = current(); e != nil {
-				return e
-			}
+			return current()
 		}
-		network := helper.Config{Listen: netip.AddrPortFrom(source, uint16(cfg.Sync.Port)).String(), Interface: cfg.NAS.Interface, Prefix: cfg.NAS.Prefix, Peers: []string{cfg.NAS.Host}}
+		return fixed, nil
+	}
+	// nas.host is the last known NAS address. If the NAS stops answering there
+	// (for example after a DHCP change), the locator finds it again on the direct
+	// subnet by its pinned certificate.
+	s.locator, err = nasfind.New(nasfind.Options{Initial: netip.MustParseAddr(cfg.NAS.Host), Prefix: prefix,
+		Probe: func(ctx context.Context, address netip.Addr) error { return s.client.Probe(ctx, address) },
+		Exclude: func() []netip.Addr {
+			if source, err := sourceNow(); err == nil {
+				return []netip.Addr{source}
+			}
+			return nil
+		}})
+	if err != nil {
+		return nil, err
+	}
+	s.nas = func() config.NAS {
+		n := cfg.NAS
+		n.Host = s.locator.Current().String()
+		return n
+	}
+	gate := func(ctx context.Context) error {
+		source, err := sourceNow()
+		if err != nil {
+			return err
+		}
+		network := helper.Config{Listen: netip.AddrPortFrom(source, uint16(cfg.Sync.Port)).String(), Interface: cfg.NAS.Interface, Prefix: cfg.NAS.Prefix, Peers: []string{s.locator.Current().String()}}
 		if err := helper.CheckNetwork(ctx, network); err != nil {
 			return err
 		}
@@ -81,13 +106,21 @@ func openSync(cfg *config.Config, state string, db *index.DB, observer *observe.
 		if err != nil {
 			return err
 		}
-		if result := languard.EvaluateMount(cfg.NAS, mounts); !result.Eligible {
+		result := languard.EvaluateMount(s.nas(), mounts)
+		if host, ok := languard.MountedHost(cfg.NAS, mounts); !result.Eligible && ok && prefix.Contains(host) && host != s.locator.Current() {
+			// The share was remounted at another address: the NAS may have moved.
+			// Adopt it only once the pinned certificate is found there.
+			if _, err := s.locator.Relocate(ctx, s.locator.Current()); err == nil {
+				result = languard.EvaluateMount(s.nas(), mounts)
+			}
+		}
+		if !result.Eligible {
 			return fmt.Errorf("NAS mount: %s", result.Reason)
 		}
 		return ctx.Err()
 	}
 	exclusions := append(append([]string{}, cfg.Selective.ExcludeLocal...), cfg.Selective.ExcludeRemote...)
-	s.client, err = transferapi.NewClient(transferapi.ClientOptions{Namespace: cfg.Sync.Namespace, Endpoint: netip.AddrPortFrom(netip.MustParseAddr(cfg.NAS.Host), uint16(cfg.Sync.Port)), Source: fixed, SourceFunc: current, Interface: cfg.NAS.Interface, Roots: ca, Certificate: certificate, ServerFingerprint: cfg.Sync.ServerFingerprint, ClientID: identity, Exclusions: exclusions, Writes: true, MaxFileBytes: cfg.Sync.MaxFileBytes, MaxBatchBytes: cfg.Sync.MaxBatchBytes, Gate: gate, RecordTraffic: recordTraffic})
+	s.client, err = transferapi.NewClient(transferapi.ClientOptions{Namespace: cfg.Sync.Namespace, Endpoint: netip.AddrPortFrom(netip.MustParseAddr(cfg.NAS.Host), uint16(cfg.Sync.Port)), Source: fixed, SourceFunc: current, Interface: cfg.NAS.Interface, Roots: ca, Certificate: certificate, ServerFingerprint: cfg.Sync.ServerFingerprint, ClientID: identity, Exclusions: exclusions, Writes: true, MaxFileBytes: cfg.Sync.MaxFileBytes, MaxBatchBytes: cfg.Sync.MaxBatchBytes, Gate: gate, Locator: s.locator, RecordTraffic: recordTraffic})
 	if err != nil {
 		return nil, err
 	}

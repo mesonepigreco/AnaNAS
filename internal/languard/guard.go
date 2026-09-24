@@ -163,6 +163,26 @@ func Evaluate(n config.NAS, mounts []Mount, routes []Route, physical bool, addre
 	return EvaluateMount(n, mounts)
 }
 
+// MountedHost returns the server address of the CIFS mount at the configured
+// mount point when its share matches, whatever address it was mounted from.
+func MountedHost(n config.NAS, mounts []Mount) (netip.Addr, bool) {
+	var host netip.Addr
+	found := false
+	for _, m := range mounts {
+		if filepath.Clean(m.Point) != filepath.Clean(n.MountPoint) || m.Type != "cifs" {
+			continue
+		}
+		rest, ok := strings.CutPrefix(m.Source, "//")
+		server, share, cut := strings.Cut(rest, "/")
+		address, err := netip.ParseAddr(server)
+		if !ok || !cut || share != n.Share || err != nil || found {
+			return netip.Addr{}, false
+		}
+		host, found = address, true
+	}
+	return host, found
+}
+
 // EvaluateMount checks only mount metadata. A native transfer client must also
 // validate its exact source-bound physical LAN route before using this result.
 func EvaluateMount(n config.NAS, mounts []Mount) Result {

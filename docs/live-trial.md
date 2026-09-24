@@ -22,6 +22,13 @@ deployed QNAP helper was updated in place with backups. The share remounted
 automatically on the new address, the daemon reconnected and the queued backlog
 synchronized.
 
+The NAS also uses DHCP. After the follow-up change, the helper listens on its
+current address and the PC finds a moved NAS by its pinned certificate. On the
+live deployment, the daemon was started with a wrong last-known NAS address. It
+found the NAS by searching the subnet and resumed sync, and a file create and
+delete then propagated. A real NAS renumbering (and the timer-driven remount)
+has not yet been observed.
+
 The desktop panel was checked for folder/terminal actions, pending-file
 confirmation, automatic refresh and complete wrapped status details. Indicator
 errors and paths use compact menu labels. Closing a panel hides its persistent

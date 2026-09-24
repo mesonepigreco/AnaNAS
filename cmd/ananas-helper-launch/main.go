@@ -34,12 +34,20 @@ func (o launchOptions) validate() error {
 			return fmt.Errorf("canonical helper and config paths required")
 		}
 	}
-	endpoint, err := netip.ParseAddrPort(o.listen)
+	prefix, err := netip.ParsePrefix(o.prefix)
+	if err != nil || !prefix.Addr().Is4() || prefix != prefix.Masked() {
+		return fmt.Errorf("matching IPv4 prefix required")
+	}
+	listen := o.listen
+	if port, ok := helper.CurrentAddressPort(o.listen); ok {
+		// ":PORT" follows the interface's current (DHCP) address in the prefix.
+		listen = netip.AddrPortFrom(prefix.Addr(), port).String()
+	}
+	endpoint, err := netip.ParseAddrPort(listen)
 	if err != nil || !endpoint.Addr().Is4() || endpoint.Port() < 1024 || (!endpoint.Addr().IsPrivate() && !endpoint.Addr().IsLoopback()) {
 		return fmt.Errorf("specific private IPv4 listener on an unprivileged port required")
 	}
-	prefix, err := netip.ParsePrefix(o.prefix)
-	if err != nil || !prefix.Addr().Is4() || prefix != prefix.Masked() || !prefix.Contains(endpoint.Addr()) {
+	if !prefix.Contains(endpoint.Addr()) {
 		return fmt.Errorf("matching IPv4 prefix required")
 	}
 	peers, err := helper.ParsePeer(o.peer)
@@ -98,7 +106,47 @@ func run(o launchOptions) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	network := helper.Config{Listen: o.listen, Interface: o.device, Prefix: o.prefix, Peers: []string{o.peer}}
+	port, current := helper.CurrentAddressPort(o.listen)
+	if !current {
+		return serve(ctx, o, o.listen, nil)
+	}
+	prefix := netip.MustParsePrefix(o.prefix)
+	for {
+		// Wait for DHCP at boot, then serve until the address changes.
+		address, err := helper.InterfaceSource(o.device, prefix)
+		for err != nil {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(addressCheck):
+			}
+			address, err = helper.InterfaceSource(o.device, prefix)
+		}
+		moved := func() bool {
+			now, err := helper.InterfaceSource(o.device, prefix)
+			return err != nil || now != address
+		}
+		err = serve(ctx, o, netip.AddrPortFrom(address, port).String(), moved)
+		if ctx.Err() != nil || !moved() {
+			return err
+		}
+		fmt.Fprintln(os.Stderr, "anaNAS launcher: interface address changed; rebinding")
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// addressCheck is how often a current-address launcher rereads local interface
+// metadata. It sends no network traffic.
+const addressCheck = 10 * time.Second
+
+// serve binds listen, runs one helper child and returns when it exits, the
+// context ends, or moved reports that the interface address changed.
+func serve(ctx context.Context, o launchOptions, listen string, moved func() bool) error {
+	network := helper.Config{Listen: listen, Interface: o.device, Prefix: o.prefix, Peers: []string{o.peer}}
 	if err := helper.CheckNetwork(ctx, network); err != nil {
 		return err
 	}
@@ -109,7 +157,7 @@ func run(o launchOptions) error {
 		})
 		return errors.Join(err, bindErr)
 	}}
-	listener, err := lc.Listen(ctx, "tcp4", o.listen)
+	listener, err := lc.Listen(ctx, "tcp4", listen)
 	if err != nil {
 		return err
 	}
@@ -138,11 +186,24 @@ func run(o launchOptions) error {
 	f.Close()
 	done := make(chan error, 1)
 	go func() { done <- child.Wait() }()
-	select {
-	case err := <-done:
-		return err
-	case <-ctx.Done():
-		_ = child.Process.Signal(syscall.SIGTERM)
-		return <-done
+	var tick <-chan time.Time
+	if moved != nil {
+		ticker := time.NewTicker(addressCheck)
+		defer ticker.Stop()
+		tick = ticker.C
+	}
+	for {
+		select {
+		case err := <-done:
+			return err
+		case <-ctx.Done():
+			_ = child.Process.Signal(syscall.SIGTERM)
+			return <-done
+		case <-tick:
+			if moved() {
+				_ = child.Process.Signal(syscall.SIGTERM)
+				return <-done
+			}
+		}
 	}
 }

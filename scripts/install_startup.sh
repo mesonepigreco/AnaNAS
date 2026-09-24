@@ -10,6 +10,7 @@ for ANANAS_FILE in /usr/local/libexec/ananas-mount \
     /etc/ananas-mount-network.nft \
     /etc/systemd/system/ananas-mount-network.service \
     /etc/systemd/system/ananas-mount.service \
+    /etc/systemd/system/ananas-mount.timer \
     /etc/NetworkManager/dispatcher.d/90-ananas-mount; do
     test ! -e "$ANANAS_FILE" || { echo "Existing installation path requires inspection: $ANANAS_FILE" >&2; exit 1; }
 done
@@ -27,11 +28,13 @@ echo 'Installing anaNAS startup services'
 /usr/bin/install -m 0644 "$ANANAS_REPO/deploy/ananas-mount-network.nft" /etc/ananas-mount-network.nft
 /usr/bin/install -m 0644 "$ANANAS_REPO/deploy/ananas-mount-network.service" /etc/systemd/system/ananas-mount-network.service
 /usr/bin/install -m 0644 "$ANANAS_REPO/deploy/ananas-mount.service" /etc/systemd/system/ananas-mount.service
+/usr/bin/install -m 0644 "$ANANAS_REPO/deploy/ananas-mount.timer" /etc/systemd/system/ananas-mount.timer
 /usr/bin/install -m 0755 "$ANANAS_REPO/deploy/90-ananas-mount" /etc/NetworkManager/dispatcher.d/90-ananas-mount
-/usr/bin/systemd-analyze verify /etc/systemd/system/ananas-mount.service /etc/systemd/system/ananas-mount-network.service
+/usr/bin/systemd-analyze verify /etc/systemd/system/ananas-mount.service /etc/systemd/system/ananas-mount-network.service /etc/systemd/system/ananas-mount.timer
 /usr/bin/systemctl daemon-reload
 /usr/bin/systemctl enable --now ananas-mount-network.service
 /usr/bin/systemctl enable ananas-mount.service
+/usr/bin/systemctl enable --now ananas-mount.timer
 /usr/bin/loginctl enable-linger example-user
 ananas_user() {
     /usr/sbin/runuser -u example-user -- /usr/bin/env \
@@ -50,4 +53,4 @@ ananas_user start nas-sync.service
 trap - EXIT
 echo 'anaNAS boot startup and saved-credential remount verified'
 /usr/bin/loginctl show-user example-user -p Linger
-/usr/bin/systemctl is-enabled ananas-mount.service ananas-mount-network.service
+/usr/bin/systemctl is-enabled ananas-mount.service ananas-mount-network.service ananas-mount.timer

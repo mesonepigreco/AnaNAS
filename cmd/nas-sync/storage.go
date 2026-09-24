@@ -22,7 +22,7 @@ type capacity struct {
 	Message   string    `json:"message,omitempty"`
 }
 type storageView struct {
-	cfg    config.NAS
+	nas    func() config.NAS
 	db     *index.DB
 	mu     sync.Mutex
 	cached capacity
@@ -51,14 +51,15 @@ func (s *storageView) space(ctx context.Context) capacity {
 		return result
 	}
 	mounts, err := languard.ParseMounts(raw)
-	if err != nil || !languard.EvaluateMount(s.cfg, mounts).Eligible {
+	nas := s.nas()
+	if err != nil || !languard.EvaluateMount(nas, mounts).Eligible {
 		return result
 	}
 	// Bound the subprocess and never stat an unmounted path (which would report
 	// local disk capacity as NAS space). No recursive NAS traversal is needed.
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	command := exec.CommandContext(ctx, "/usr/bin/df", "-B1", "--output=size,used,avail", "--", s.cfg.MountPoint)
+	command := exec.CommandContext(ctx, "/usr/bin/df", "-B1", "--output=size,used,avail", "--", nas.MountPoint)
 	command.Env = append(os.Environ(), "LC_ALL=C")
 	command.WaitDelay = time.Second
 	data, err := command.Output()

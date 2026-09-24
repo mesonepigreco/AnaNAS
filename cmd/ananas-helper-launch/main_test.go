@@ -12,10 +12,11 @@ func TestLauncherRejectsBroaderIdentityAndNetworkScope(t *testing.T) {
 	}
 	subnet := base
 	subnet.peer = "10.23.42.0/24"
+	subnet.listen = ":8742"
 	if err := subnet.validate(); err != nil {
-		t.Fatal("direct client subnet rejected:", err)
+		t.Fatal("direct client subnet and current-address listener rejected:", err)
 	}
-	for _, mode := range []string{"root", "root group", "wildcard", "hostname", "public", "outside subnet", "wider subnet", "noncanonical subnet", "low port", "unbounded", "long test", "relative"} {
+	for _, mode := range []string{"root", "root group", "wildcard", "hostname", "public", "outside subnet", "wider subnet", "noncanonical subnet", "low port", "current low port", "empty port", "unbounded", "long test", "relative"} {
 		t.Run(mode, func(t *testing.T) {
 			o := base
 			switch mode {
@@ -35,6 +36,10 @@ func TestLauncherRejectsBroaderIdentityAndNetworkScope(t *testing.T) {
 				o.peer = "10.23.0.0/16"
 			case "noncanonical subnet":
 				o.peer = "10.23.42.17/24"
+			case "current low port":
+				o.listen = ":22"
+			case "empty port":
+				o.listen = ":"
 			case "low port":
 				o.listen = "10.23.42.30:22"
 			case "unbounded":

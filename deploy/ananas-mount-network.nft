@@ -1,7 +1,9 @@
+# SMB to the direct subnet must leave through the physical LAN interface. The
+# mount helper sends credentials only to the host with the pinned certificate.
 table inet ananas_mount {
     chain output {
         type filter hook output priority -11; policy accept;
-        ip daddr 10.23.42.30 tcp dport 445 oifname "enp1s0" accept
-        ip daddr 10.23.42.30 tcp dport 445 reject
+        ip daddr 10.23.42.0/24 tcp dport 445 oifname "enp1s0" accept
+        ip daddr 10.23.42.0/24 tcp dport 445 reject
     }
 }

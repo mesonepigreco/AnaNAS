@@ -187,6 +187,24 @@ func TestHelperAcceptsDirectClientSubnet(t *testing.T) {
 	}
 }
 
+func TestHelperResolvesCurrentAddressListener(t *testing.T) {
+	c := helperFixture(t).config
+	c.Listen = ":9876"
+	if err := c.Validate(); err != nil {
+		t.Fatal("current-address listener rejected:", err)
+	}
+	resolved, err := c.Resolved()
+	if err != nil || resolved.Listen != "127.0.0.1:9876" {
+		t.Fatal(resolved.Listen, err)
+	}
+	for _, listen := range []string{":", ":0", ":09876", ":x"} {
+		c.Listen = listen
+		if err := c.Validate(); err == nil {
+			t.Fatal("accepted listener", listen)
+		}
+	}
+}
+
 func TestInheritedListenerDoesNotCloseUnrelatedDescriptor(t *testing.T) {
 	f := helperFixture(t)
 	reader, writer, err := os.Pipe()

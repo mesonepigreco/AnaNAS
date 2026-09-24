@@ -4,7 +4,7 @@
   "root": "/share/EXAMPLE_VOLUME/ananas-example/root",
   "stateDir": "/share/EXAMPLE_VOLUME/ananas-example/state",
   "namespace": "1111111111111111111111111111111111111111111111111111111111111111",
-  "listen": "10.23.42.30:8742",
+  "listen": ":8742",
   "interface": "eth0",
   "prefix": "10.23.42.0/24",
   "peers": ["10.23.42.0/24"],

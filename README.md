@@ -124,7 +124,7 @@ For manual inspection or an advanced installation, start with
 | Setting | Value to supply |
 | --- | --- |
 | `local.root` | Absolute path to your local sync folder |
-| `nas.host`, `nas.share` | Your NAS private IPv4 address and SMB share name |
+| `nas.host`, `nas.share` | Your NAS's last known private IPv4 address and SMB share name. If DHCP moves the NAS, it is found again on `nas.prefix` by its pinned certificate |
 | `nas.interface`, `nas.prefix` | PC network interface and directly connected subnet; inspect with `ip -brief address` and `ip route` |
 | `nas.mountPoint` | Local mount path for that share |
 | `stateDir` | Separate writable state/cache directory outside all sync roots |

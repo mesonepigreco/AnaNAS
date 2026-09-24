@@ -127,6 +127,33 @@ func TestClientFollowsCurrentSourceAddress(t *testing.T) {
 	}
 }
 
+type movedNAS struct{ current, moved netip.Addr }
+
+func (m *movedNAS) Current() netip.Addr { return m.current }
+func (m *movedNAS) Relocate(context.Context, netip.Addr) (netip.Addr, error) {
+	m.current = m.moved
+	return m.moved, nil
+}
+
+func TestClientFollowsRelocatedNAS(t *testing.T) {
+	f := setup(t, true, nil)
+	o := clientOptions(f)
+	real := o.Endpoint.Addr()
+	// Nothing listens on 127.0.0.2; the locator reports where the NAS moved.
+	nas := &movedNAS{current: netip.MustParseAddr("127.0.0.2"), moved: real}
+	o.Locator = nas
+	c := newTestClient(t, o)
+	if _, err := c.State(context.Background()); err != nil || c.Endpoint().Addr() != real {
+		t.Fatal(c.Endpoint(), err)
+	}
+	if err := c.Probe(context.Background(), real); err != nil {
+		t.Fatal("pinned NAS probe failed:", err)
+	}
+	if err := c.Probe(context.Background(), netip.MustParseAddr("127.0.0.2")); err == nil {
+		t.Fatal("absent host accepted as NAS")
+	}
+}
+
 func TestClientRejectsBeforeNetwork(t *testing.T) {
 	f := setup(t, true, nil)
 	o := clientOptions(f)

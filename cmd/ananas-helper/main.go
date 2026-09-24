@@ -46,6 +46,9 @@ func run() (result error) {
 	if err != nil {
 		return err
 	}
+	if c, err = c.Resolved(); err != nil {
+		return err
+	}
 	if err := helper.CheckFiles(c); err != nil {
 		return err
 	}

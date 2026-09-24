@@ -79,3 +79,24 @@ func TestEvaluateGVFSIsInspectionOnly(t *testing.T) {
 		t.Fatalf("GVFS should not be write eligible: %+v", got)
 	}
 }
+
+func TestMountedHostReportsTheShareAddress(t *testing.T) {
+	n := config.NAS{Host: "10.23.42.30", MountPoint: "/mnt/nas", Share: "Nasdir", Protocol: "smb"}
+	moved := []Mount{{Point: "/mnt/nas", Type: "cifs", Source: "//10.23.42.77/Nasdir"}}
+	if host, ok := MountedHost(n, moved); !ok || host != netip.MustParseAddr("10.23.42.77") {
+		t.Fatal(host, ok)
+	}
+	if EvaluateMount(n, moved).Eligible {
+		t.Fatal("mount at another address accepted for the configured host")
+	}
+	for _, mounts := range [][]Mount{
+		nil,
+		{{Point: "/mnt/nas", Type: "cifs", Source: "//10.23.42.77/Other"}},
+		{{Point: "/mnt/nas", Type: "cifs", Source: "//nas.local/Nasdir"}},
+		{moved[0], moved[0]},
+	} {
+		if _, ok := MountedHost(n, mounts); ok {
+			t.Fatal("unexpected host for", mounts)
+		}
+	}
+}

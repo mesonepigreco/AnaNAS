@@ -67,10 +67,25 @@ holds in `nas.prefix`, re-read before every check and dial so a DHCP lease chang
 does not take sync offline. Helper `peers` (and launcher `-peer`) accept either
 one address or a canonical subnet inside the direct prefix; a subnet authorizes a
 DHCP client while each accepted connection is still route-checked for its actual
-address and authenticated by its certificate pin. Local
+address and authenticated by its certificate pin.
+
+The NAS address may also change. A helper `listen` of `":PORT"` means the
+interface's current address in the prefix: the launcher waits for it at boot,
+rereads local interface metadata every 10 s and rebinds the helper when it
+changes. The PC treats `nas.host` as the last known address and verifies the NAS
+by its pinned leaf certificate and private CA, not the certificate's IP address.
+When the NAS stops answering there, presents another certificate, or the share
+is mounted at another address, the daemon probes the previous address, then the
+direct prefix (at most a /22, 32 concurrent TLS handshakes, one search per
+minute), and adopts only a host presenting the pinned certificate. The root
+mount helper does the same without reading any private key (TLS 1.3 delivers the
+server certificate first), sends SMB credentials only to that host, and a
+two-minute timer re-runs it because a NAS renumbering emits no PC event. Local
 netlink checks require the configured address/prefix, physical carrier and direct
 route without a gateway, multipath or alternate interface. Checks run at startup
-and application gates, without DNS, ping, directory scanning or idle polling.
+and application gates, without DNS, ping or directory scanning. The only idle
+work is the launcher's local address reread and the PC mount timer's single
+handshake; the subnet search runs only after the NAS stops answering.
 These checks and socket binding do **not** provide the required OS egress policy
 or prove behavior across route changes; that acceptance gate remains open.
 

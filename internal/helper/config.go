@@ -69,12 +69,21 @@ func (c Config) Validate() error {
 		}
 		groupSet[group] = true
 	}
-	endpoint, err := netip.ParseAddrPort(c.Listen)
+	prefix, err := netip.ParsePrefix(c.Prefix)
+	if err != nil || !prefix.Addr().Is4() || prefix != prefix.Masked() {
+		return fmt.Errorf("matching canonical IPv4 prefix required")
+	}
+	listen := c.Listen
+	if port, ok := CurrentAddressPort(c.Listen); ok {
+		// ":PORT" listens on the interface's current address in the prefix;
+		// validate the prefix itself as the stand-in listener address.
+		listen = netip.AddrPortFrom(prefix.Addr(), port).String()
+	}
+	endpoint, err := netip.ParseAddrPort(listen)
 	if err != nil || !endpoint.Addr().Is4() || endpoint.Port() == 0 || (!endpoint.Addr().IsPrivate() && !endpoint.Addr().IsLoopback()) {
 		return fmt.Errorf("specific private IPv4 listener required")
 	}
-	prefix, err := netip.ParsePrefix(c.Prefix)
-	if err != nil || !prefix.Addr().Is4() || prefix != prefix.Masked() || !prefix.Contains(endpoint.Addr()) {
+	if !prefix.Contains(endpoint.Addr()) {
 		return fmt.Errorf("matching canonical IPv4 prefix required")
 	}
 	if c.Interface == "" || len(c.Interface) > 15 || strings.ContainsAny(c.Interface, "/\\\x00 \t\r\n") || (endpoint.Addr().IsLoopback() != (c.Interface == "lo")) {

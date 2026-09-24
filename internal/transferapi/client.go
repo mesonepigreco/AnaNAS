@@ -48,9 +48,21 @@ type ClientOptions struct {
 	Writes                      bool
 	MaxFileBytes, MaxBatchBytes int64
 	Gate                        func(context.Context) error
+	// Locator, when set, supplies the NAS's current address and finds it again
+	// after the current address stops answering or presents another certificate.
+	Locator Locator
 	// RecordTraffic receives encrypted stream byte deltas; it must not perform I/O.
 	RecordTraffic func(upload, download uint64)
 }
+
+// Locator tracks a NAS whose address may change (for example through DHCP).
+type Locator interface {
+	Current() netip.Addr
+	// Relocate is called after failed stopped answering as the NAS. It returns
+	// the verified current address, or failed itself when no move was found.
+	Relocate(ctx context.Context, failed netip.Addr) (netip.Addr, error)
+}
+
 type Traffic struct {
 	Sent     uint64 `json:"sent"`
 	Received uint64 `json:"received"`
@@ -94,6 +106,8 @@ type Client struct {
 	sent, received   atomic.Uint64
 	changes          chan struct{}
 	operationTimeout time.Duration
+	source           func() (netip.Addr, error)
+	tls              *tls.Config
 }
 
 // NewClient permits only an IPv4 private literal (or explicit loopback tests),
@@ -143,53 +157,120 @@ func NewClient(o ClientOptions) (*Client, error) {
 	seconds := (o.MaxBatchBytes + (2 << 20) - 1) / (2 << 20)
 	operationTimeout := 45*time.Second + time.Duration(seconds*8)*time.Second
 	c := &Client{opts: o, exclusions: m, baseURL: "https://" + o.Endpoint.String(), changes: make(chan struct{}, 1), operationTimeout: operationTimeout}
-	dialer := net.Dialer{Timeout: 5 * time.Second, KeepAlive: -1, Control: func(network, address string, raw syscall.RawConn) error {
-		if network != "tcp4" || address != o.Endpoint.String() {
-			return fmt.Errorf("unexpected dial destination")
+	c.source = func() (netip.Addr, error) {
+		source := o.Source
+		if o.SourceFunc != nil {
+			var err error
+			if source, err = o.SourceFunc(); err != nil {
+				return netip.Addr{}, err
+			}
 		}
-		var bindErr error
-		err := raw.Control(func(fd uintptr) {
-			bindErr = socketpolicy.BindIPv4(int(fd), o.Interface)
-		})
-		return errors.Join(err, bindErr)
-	}}
-	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: o.Roots, Certificates: []tls.Certificate{o.Certificate}, ServerName: o.Endpoint.Addr().String(), NextProtos: []string{"http/1.1"}, VerifyConnection: func(state tls.ConnectionState) error {
-		if len(state.VerifiedChains) == 0 || len(state.PeerCertificates) == 0 {
+		return source, validSource(source)
+	}
+	// The NAS is identified by its pinned leaf certificate issued by the private
+	// CA, not by the IP address in its certificate, so a DHCP-renumbered NAS is
+	// still recognized and an unrelated host at the old address is rejected.
+	c.tls = &tls.Config{MinVersion: tls.VersionTLS13, InsecureSkipVerify: true, Certificates: []tls.Certificate{o.Certificate}, NextProtos: []string{"http/1.1"}, VerifyConnection: func(state tls.ConnectionState) error {
+		if len(state.PeerCertificates) == 0 {
 			return fmt.Errorf("verified NAS certificate required")
 		}
 		digest := sha256.Sum256(state.PeerCertificates[0].Raw)
 		if hex.EncodeToString(digest[:]) != o.ServerFingerprint {
 			return fmt.Errorf("NAS certificate pin changed")
 		}
+		intermediates := x509.NewCertPool()
+		for _, certificate := range state.PeerCertificates[1:] {
+			intermediates.AddCert(certificate)
+		}
+		if _, err := state.PeerCertificates[0].Verify(x509.VerifyOptions{Roots: o.Roots, Intermediates: intermediates, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
+			return fmt.Errorf("verified NAS certificate required: %w", err)
+		}
 		return nil
 	}}
-	c.transport = &http.Transport{Proxy: nil, TLSClientConfig: tlsConfig, ForceAttemptHTTP2: false, MaxConnsPerHost: 2, MaxIdleConnsPerHost: 1, MaxIdleConns: 1, IdleConnTimeout: 15 * time.Second, TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: operationTimeout, DisableCompression: true, TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{}, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+	c.transport = &http.Transport{Proxy: nil, ForceAttemptHTTP2: false, MaxConnsPerHost: 2, MaxIdleConnsPerHost: 1, MaxIdleConns: 1, IdleConnTimeout: 15 * time.Second, TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: operationTimeout, DisableCompression: true, TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{}, DialTLSContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+		// The URL host names the configured endpoint; the connection goes to the
+		// NAS's current address, which the locator may have moved.
 		if address != o.Endpoint.String() {
 			return nil, fmt.Errorf("endpoint redirection refused")
 		}
 		if err := o.Gate(ctx); err != nil {
 			return nil, err
 		}
-		source := o.Source
-		if o.SourceFunc != nil {
-			var err error
-			if source, err = o.SourceFunc(); err != nil {
-				return nil, err
-			}
-			if err := validSource(source); err != nil {
-				return nil, err
-			}
+		endpoint := c.Endpoint()
+		conn, err := c.dial(ctx, endpoint, true)
+		if err == nil || o.Locator == nil || ctx.Err() != nil {
+			return conn, err
 		}
-		bound := dialer
-		bound.LocalAddr = &net.TCPAddr{IP: net.IP(source.AsSlice())}
-		conn, err := bound.DialContext(ctx, "tcp4", address)
-		if err != nil {
+		moved, locateErr := o.Locator.Relocate(ctx, endpoint.Addr())
+		if locateErr != nil {
+			return nil, errors.Join(err, locateErr)
+		}
+		if moved == endpoint.Addr() {
 			return nil, err
 		}
-		return &countedConnection{Conn: conn, client: c}, nil
+		// Re-run the policy gate for the new peer before connecting to it.
+		if err := o.Gate(ctx); err != nil {
+			return nil, err
+		}
+		return c.dial(ctx, netip.AddrPortFrom(moved, o.Endpoint.Port()), true)
 	}}
 	c.http = &http.Client{Transport: c.transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	return c, nil
+}
+
+// Endpoint returns the address connections currently use.
+func (c *Client) Endpoint() netip.AddrPort {
+	if c.opts.Locator != nil {
+		if current := c.opts.Locator.Current(); current.IsValid() {
+			return netip.AddrPortFrom(current, c.opts.Endpoint.Port())
+		}
+	}
+	return c.opts.Endpoint
+}
+
+// Probe reports whether address answers on the helper port with the pinned NAS
+// certificate. It sends only a TLS handshake over the bound interface.
+func (c *Client) Probe(ctx context.Context, address netip.Addr) error {
+	conn, err := c.dial(ctx, netip.AddrPortFrom(address, c.opts.Endpoint.Port()), false)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
+}
+
+func (c *Client) dial(ctx context.Context, endpoint netip.AddrPort, count bool) (net.Conn, error) {
+	if !endpoint.Addr().Is4() || (!endpoint.Addr().IsPrivate() && !endpoint.Addr().IsLoopback()) || endpoint.Addr().IsLoopback() != c.opts.Endpoint.Addr().IsLoopback() {
+		return nil, fmt.Errorf("private IPv4 endpoint literal required")
+	}
+	source, err := c.source()
+	if err != nil {
+		return nil, err
+	}
+	dialer := net.Dialer{Timeout: 5 * time.Second, KeepAlive: -1, LocalAddr: &net.TCPAddr{IP: net.IP(source.AsSlice())}, Control: func(network, address string, raw syscall.RawConn) error {
+		if network != "tcp4" || address != endpoint.String() {
+			return fmt.Errorf("unexpected dial destination")
+		}
+		var bindErr error
+		err := raw.Control(func(fd uintptr) {
+			bindErr = socketpolicy.BindIPv4(int(fd), c.opts.Interface)
+		})
+		return errors.Join(err, bindErr)
+	}}
+	raw, err := dialer.DialContext(ctx, "tcp4", endpoint.String())
+	if err != nil {
+		return nil, err
+	}
+	if count {
+		raw = &countedConnection{Conn: raw, client: c}
+	}
+	conn := tls.Client(raw, c.tls)
+	handshake, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := conn.HandshakeContext(handshake); err != nil {
+		raw.Close()
+		return nil, err
+	}
+	return conn, nil
 }
 
 type countedConnection struct {

@@ -628,7 +628,7 @@ def _install(session, inventory, plan, progress):
                       "certificate": str(tls / "client.pem"), "privateKey": str(tls / "client.key"), "ca": str(tls / "ca.pem"),
                       "serverFingerprint": pins["server"], "maxFileBytes": 8589934592, "maxBatchBytes": 8589934592, "maxCacheEntries": 1000000}
     nas = {"liveWrites": True, "root": root, "stateDir": base + "/state", "observerStateDir": base + "/observer",
-           "namespace": namespace, "listen": f"{session.host}:{plan['port']}", "interface": device, "prefix": session.route["prefix"],
+           "namespace": namespace, "listen": f":{plan['port']}", "interface": device, "prefix": session.route["prefix"],
            "peers": [session.route["prefix"]], "uid": account["uid"], "gid": account["gid"], "groups": [account["gid"]],
            "certificate": base + "/server.pem", "privateKey": base + "/server.key", "clientCA": base + "/ca.pem",
            "clients": {pins["client"]: identity}, "exclusions": ["@Recycle/"], "maxConnections": 2,
@@ -678,7 +678,7 @@ esac
                                 "-x", base + "/helper", "--", "-config", base + "/helper.json", "-check-config"]), admin=True)
     atomically(config_path, json.dumps(config, indent=2).encode())
     progress("Preparing saved-credential mounting and PC autostart (administrator confirmation)…")
-    system_plan = dict(plan, password=session.password, nasUsername=session.username)
+    system_plan = dict(plan, password=session.password, nasUsername=session.username, pin=pins["server"])
     run(["pkexec", "/usr/bin/python3", str(bundle_home() / "ananas_setup_system.py"), "--install"],
         data=json.dumps(system_plan).encode(), timeout=180)
     atomically(record, json.dumps({"phase": "pc-prepared", "plan": plan}, indent=2).encode())

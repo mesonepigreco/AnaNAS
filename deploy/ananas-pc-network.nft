@@ -1,8 +1,10 @@
 # Fixed PC deployment: only this user's dedicated anaNAS helper port is scoped.
+# The NAS address may change through DHCP, so the direct subnet is allowed; the
+# daemon accepts only the host presenting the pinned helper certificate.
 table inet ananas {
   chain output {
     type filter hook output priority -10; policy accept;
-    meta skuid 1000 tcp dport 8742 ip daddr 10.23.42.30 oifname "enp1s0" accept
+    meta skuid 1000 tcp dport 8742 ip daddr 10.23.42.0/24 oifname "enp1s0" accept
     meta skuid 1000 tcp dport 8742 reject
   }
 }

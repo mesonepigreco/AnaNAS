@@ -234,7 +234,11 @@ func runApplication(ctx context.Context, cfg *config.Config, once, identity bool
 		}
 		return err
 	}
-	storage := &storageView{cfg: cfg.NAS, db: db}
+	storage := &storageView{nas: func() config.NAS { return cfg.NAS }, db: db}
+	if live != nil {
+		// Follow the NAS if the locator found it at another address.
+		storage.nas = live.nas
+	}
 	statusServer, err := web.NewWithPending(cfg.WebPort, func() any {
 		status := observer.Status()
 		reason := "NAS transfers disabled: synchronization engine and safety validation are incomplete."

@@ -1,0 +1,12 @@
+[Unit]
+Description=Re-check that the anaNAS mount follows the NAS address
+
+# A DHCP change on the NAS emits no event on the PC. This re-runs the mount
+# check, which costs one TLS handshake when the NAS has not moved.
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=2min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

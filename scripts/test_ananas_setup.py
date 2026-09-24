@@ -151,11 +151,31 @@ class SetupTests(unittest.TestCase):
     def test_system_validator_refuses_injection(self):
         plan = dict(id='a' * 16, uid=os.getuid(), gid=os.getgid(), username=__import__('pwd').getpwuid(os.getuid()).pw_name,
                     host='10.23.42.30', route=dict(host='10.23.42.30', source='10.23.42.17', prefix='10.23.42.0/24', interface='enp1s0'),
-                    share='Public', mountPoint='/mnt/ananas-' + 'a' * 16, port=18742)
+                    share='Public', mountPoint='/mnt/ananas-' + 'a' * 16, port=18742, pin='b' * 64)
         system.validate(plan)
-        for key, value in [('id', '../etc'), ('mountPoint', '/'), ('share', 'Public\npassword=x'), ('port', 22)]:
+        for key, value in [('id', '../etc'), ('mountPoint', '/'), ('share', 'Public\npassword=x'), ('port', 22), ('pin', 'x')]:
             with self.subTest(key=key), self.assertRaises(ValueError):
                 system.validate(dict(plan, **{key: value}))
+
+    def test_system_mount_follows_a_moved_nas_by_its_pin(self):
+        plan = dict(id='a' * 16, share='Public', mountPoint='/mnt/ananas-' + 'a' * 16, port=18742, pin='b' * 64, host='10.23.42.30',
+                    route=dict(host='10.23.42.30', source='10.23.42.17', prefix='10.23.42.0/24', interface='enp1s0'))
+        probed = []
+
+        def probe(address):
+            probed.append(address)
+            return address == '10.23.42.77'
+        self.assertEqual(system.find_nas(plan, [None, '10.23.42.30'], {'10.23.42.17'}, probe), '10.23.42.77')
+        self.assertEqual(probed[0], '10.23.42.30')
+        self.assertNotIn('10.23.42.17', probed)
+        self.assertNotIn('10.23.42.0', probed)
+        self.assertNotIn('10.23.42.255', probed)
+        row = '36 25 0:50 / /mnt/ananas-' + 'a' * 16 + ' rw - cifs //{0}/Public rw,vers=3.1.1,seal\n'
+        self.assertIsNone(system.mounted_host(plan, ''))
+        self.assertEqual(system.mounted_host(plan, row.format('10.23.42.77')), '10.23.42.77')
+        for bad in (row.format('10.23.43.77'), row.format('nas.local'), row.format('10.23.42.77').replace(',seal', '')):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                system.mounted_host(plan, bad)
 
     def test_known_host_never_trusts_new_unverified_key(self):
         route = dict(host='10.23.42.30', source='10.23.42.17', interface='enp1s0', prefix='10.23.42.0/24')
@@ -246,6 +266,9 @@ class SetupTests(unittest.TestCase):
                 self.assertEqual(nas['root'], '/share/Volume/Public/new-folder')
                 # DHCP may renumber the PC: authorize the direct subnet, not one lease.
                 self.assertEqual(nas['peers'], ['10.23.42.0/24'])
+                # The NAS may also be renumbered: it listens on its current address.
+                self.assertEqual(nas['listen'], ':' + str(plan['port']))
+                self.assertEqual(privileged[0]['pin'], pc['sync']['serverFingerprint'])
                 self.assertNotIn('source', pc['sync'])
                 service = payloads[plan['base'] + '/service.sh'].decode()
                 self.assertIn('-s 10.23.42.0/24 -i', service)
