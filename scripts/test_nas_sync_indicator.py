@@ -2,11 +2,35 @@ import unittest
 from unittest.mock import Mock, patch
 from pathlib import Path
 
-from nas_sync_indicator import Client, Indicator, TokenParser, interface_xml, user_error
+from nas_sync_indicator import Client, Indicator, TokenParser, argb, icon_directory, icon_pixmaps, interface_xml, user_error
 from gi.repository import Gio, GLib
 
 
 class IndicatorTests(unittest.TestCase):
+    def test_icon_is_found_where_the_installer_puts_it(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as data, patch.dict('os.environ', {'XDG_DATA_HOME': data}):
+            self.assertEqual(icon_directory(), Path(data) / 'anaNAS/icons')
+            hicolor = Path(data) / 'icons/hicolor/scalable/apps'
+            hicolor.mkdir(parents=True)
+            (hicolor / 'ananas-symbolic.svg').write_text('<svg/>')
+            self.assertEqual(icon_directory(), hicolor)
+            private = Path(data) / 'anaNAS/icons'
+            private.mkdir(parents=True)
+            (private / 'ananas-symbolic.svg').write_text('<svg/>')
+            self.assertEqual(icon_directory(), private)
+
+    def test_pixmap_fallback_is_argb_and_light(self):
+        self.assertEqual(argb(1, 1, 4, bytes((1, 2, 3, 4))), bytes((4, 1, 2, 3)))
+        pixmaps = icon_pixmaps(Path(__file__).resolve().parent.parent / 'internal/web/assets/ananas-symbolic.svg', (22,))
+        self.assertEqual(len(pixmaps), 1)
+        width, height, data = pixmaps[0]
+        self.assertEqual((width, height, len(data)), (22, 22, 22 * 22 * 4))
+        drawn = [data[i:i + 4] for i in range(0, len(data), 4) if data[i] > 128]
+        self.assertTrue(drawn)
+        self.assertTrue(all(pixel[1] > 128 for pixel in drawn), 'strokes must be light for the dark top bar')
+        self.assertEqual(icon_pixmaps(Path('/nonexistent.svg')), [])
+
     def test_long_errors_and_paths_do_not_expand_menu_labels(self):
         with patch('nas_sync_indicator.Gio.bus_own_name'):
             indicator = Indicator(Client(8721), Path('/tmp/local'))

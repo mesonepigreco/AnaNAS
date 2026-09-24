@@ -16,6 +16,7 @@ import signal
 import threading
 import urllib.parse
 
+import gi
 from gi.repository import Gio, GLib
 try:
     from gi.repository import GLibUnix
@@ -29,6 +30,50 @@ MENU = "com.canonical.dbusmenu"
 BUS_NAME = "org.kde.StatusNotifierItem.nas_sync"
 MAX_RESPONSE = 65536
 RECENT_SLOTS = 12
+
+
+ICON = "ananas-symbolic"
+
+
+def icon_directory():
+    """Directory holding the panel icon. The installer puts it in the user
+    hicolor theme; older manual installs used a private anaNAS directory."""
+    data = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
+    for directory in (data / "anaNAS/icons", data / "icons/hicolor/scalable/apps"):
+        if (directory / (ICON + ".svg")).is_file():
+            return directory
+    return data / "anaNAS/icons"
+
+
+def argb(width, height, rowstride, pixels):
+    """Convert GdkPixbuf RGBA rows to StatusNotifierItem ARGB32 (network order)."""
+    out = bytearray()
+    for y in range(height):
+        row = pixels[y * rowstride:y * rowstride + width * 4]
+        for x in range(0, width * 4, 4):
+            r, g, b, a = row[x:x + 4]
+            out += bytes((a, r, g, b))
+    return bytes(out)
+
+
+def icon_pixmaps(svg, sizes=(16, 22, 24, 32)):
+    """Pixel fallback for hosts that cannot resolve the icon name. Strokes are
+    lightened because pixmaps are not recoloured for the dark GNOME top bar."""
+    try:
+        gi.require_version("GdkPixbuf", "2.0")
+        from gi.repository import GdkPixbuf
+        data = svg.read_text().replace("#2e3436", "#eeeeec").encode()
+        pixmaps = []
+        for size in sizes:
+            stream = Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(data))
+            pixbuf = GdkPixbuf.Pixbuf.new_from_stream_at_scale(stream, size, size, True, None)
+            if not pixbuf.get_has_alpha():
+                pixbuf = pixbuf.add_alpha(False, 0, 0, 0)
+            width, height = pixbuf.get_width(), pixbuf.get_height()
+            pixmaps.append((width, height, argb(width, height, pixbuf.get_rowstride(), pixbuf.get_pixels())))
+        return pixmaps
+    except (OSError, ValueError, ImportError, GLib.Error):
+        return []
 
 
 def user_error(action, error):
@@ -229,6 +274,7 @@ class Indicator:
         # layout/property load can cancel that load and leave blank cached rows.
         self.last_menu = tuple(self.items().items())
         self.last_icon = None
+        self.pixmaps = None
         self.last_overlay = None
         self.last_title = None
         self.stop = threading.Event()
@@ -340,7 +386,7 @@ class Indicator:
         return "anaNAS — " + self.sync_summary()
 
     def icon(self):
-        return "ananas-symbolic"
+        return ICON
 
     def overlay(self):
         if self.error:
@@ -355,13 +401,17 @@ class Indicator:
         if iface == MENU:
             return {"Version": GLib.Variant("u", 3), "TextDirection": GLib.Variant("s", "ltr"),
                     "Status": GLib.Variant("s", "normal"), "IconThemePath": GLib.Variant("as", [])}.get(name)
-        icon_dir = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "anaNAS/icons"
+        icon_dir = icon_directory()
         values = {"Category": "ApplicationStatus", "Id": "anaNAS", "Title": self.summary(),
                   "Status": "Active", "IconName": self.icon(), "IconThemePath": str(icon_dir),
                   "OverlayIconName": self.overlay(), "AttentionIconName": "dialog-warning-symbolic", "AttentionMovieName": "",
                   "XAyatanaLabel": "anaNAS", "XAyatanaLabelGuide": "anaNAS"}
         if name in values:
             return GLib.Variant("s", values[name])
+        if name == "IconPixmap":
+            if self.pixmaps is None:
+                self.pixmaps = icon_pixmaps(icon_dir / (ICON + ".svg"))
+            return GLib.Variant("a(iiay)", self.pixmaps)
         if name.endswith("Pixmap"):
             return GLib.Variant("a(iiay)", [])
         return {"WindowId": GLib.Variant("i", 0), "Menu": GLib.Variant("o", "/Menu"),

@@ -71,10 +71,12 @@ def install_files():
         setup.private_write(service, (repo / "deploy/nas-sync-indicator.service").read_bytes(), 0o644)
     applications = Path.home() / ".local/share/applications"
     applications.mkdir(parents=True, exist_ok=True)
-    for icon in ("ananas.svg", "ananas-symbolic.svg"):
-        icons = Path.home() / ".local/share/icons/hicolor/scalable/apps"
+    # The panel item names this private directory as its icon theme path, so
+    # the pineapple resolves even before the shell rescans the hicolor theme.
+    for icons in (Path.home() / ".local/share/icons/hicolor/scalable/apps", Path.home() / ".local/share/anaNAS/icons"):
         icons.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(repo / "internal/web/assets" / icon, icons / icon)
+        for icon in ("ananas.svg", "ananas-symbolic.svg"):
+            shutil.copy2(repo / "internal/web/assets" / icon, icons / icon)
     main_desktop = applications / "ananas.desktop"
     if not main_desktop.exists():
         setup.private_write(main_desktop, (repo / "deploy/ananas.desktop").read_bytes(), 0o644)
@@ -83,7 +85,9 @@ def install_files():
                      "Comment=Connect your QNAP and choose folders to sync\nExec=/usr/bin/python3 " +
                      '"' + str(bin_dir / "ananas_setup_gui.py").replace('"', '\\"') + '"\nIcon=folder-remote\nCategories=Network;Utility;\n').encode())
     setup.run(["systemctl", "--user", "daemon-reload"])
-    setup.run(["systemctl", "--user", "enable", "--now", "nas-sync-indicator.service"])
+    setup.run(["systemctl", "--user", "enable", "nas-sync-indicator.service"])
+    # Restart so an already running panel item reloads the updated module/icons.
+    setup.run(["systemctl", "--user", "restart", "nas-sync-indicator.service"])
     print("Installed. Existing sync profiles and running daemons were preserved.", flush=True)
 
 
