@@ -187,8 +187,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusServiceUnavailable, fmt.Errorf("transfer owner busy; retry within the operation's budget"))
 		return
 	}
-	seconds := (s.opts.MaxBatchBytes + s.opts.ReadBytesPerSecond - 1) / s.opts.ReadBytesPerSecond
-	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second+time.Duration(seconds*8)*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), transferTimeout(s.opts.MaxBatchBytes, s.opts.ReadBytesPerSecond))
 	defer cancel()
 	r = r.WithContext(ctx)
 	pace := &pacer{ctx: ctx, rate: s.opts.ReadBytesPerSecond, start: time.Now()}

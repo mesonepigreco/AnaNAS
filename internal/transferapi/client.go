@@ -168,8 +168,7 @@ func NewClient(o ClientOptions) (*Client, error) {
 	// The remote production helper is paced at 2 MiB/s. Allow up to eight
 	// bounded content passes plus protocol overhead; metadata calls share the
 	// same finite context so one active request remains interruptible.
-	seconds := (o.MaxBatchBytes + (2 << 20) - 1) / (2 << 20)
-	operationTimeout := 45*time.Second + time.Duration(seconds*8)*time.Second
+	operationTimeout := transferTimeout(o.MaxBatchBytes, 2<<20)
 	c := &Client{opts: o, exclusions: m, baseURL: "https://" + o.Endpoint.String(), changes: make(chan struct{}, 1), operationTimeout: operationTimeout, operationSlot: make(chan struct{}, 1)}
 	c.source = func() (netip.Addr, error) {
 		source := o.Source
@@ -578,7 +577,7 @@ func (c *Client) Download(ctx context.Context, sel Selection, want journal.Versi
 	wire := bufio.NewReaderSize(io.LimitReader(r.Body, max+1), 4096)
 	header, err := wire.Peek(delta.HeaderBytes)
 	if err != nil {
-		return result, err
+		return result, interruptedDownload(sel.Path, want.Size, result, r, err)
 	}
 	h, err := delta.InspectHeader(header)
 	if err != nil || h.BlockSize != base.BlockSize || h.BaseSize != base.Size || h.BaseDigest != base.Digest || h.TargetSize != want.Size {
@@ -586,7 +585,7 @@ func (c *Client) Download(ctx context.Context, sel Selection, want journal.Versi
 	}
 	result, err = delta.Apply(ctx, wire, source, base.Size, base.Digest, staging)
 	if err != nil {
-		return result, err
+		return result, interruptedDownload(sel.Path, want.Size, result, r, err)
 	}
 	if result.Digest != want.Digest || result.LiteralBytes+result.ReusedBytes != want.Size || r.Trailer.Get("X-Ananas-Error") != "" {
 		return result, fmt.Errorf("download differs from selected version or reports a failed trailer")
@@ -595,6 +594,20 @@ func (c *Client) Download(ctx context.Context, sel Selection, want journal.Versi
 		return result, err
 	}
 	return result, nil
+}
+
+// A clean HTTP EOF is still an interrupted download when the delta's terminal
+// verification frame has not arrived. Normalize only at this network boundary:
+// unrelated local EOFs must not become an endless automatic retry.
+func interruptedDownload(path string, expected int64, progress delta.Stats, response *http.Response, err error) error {
+	if errors.Is(err, io.EOF) {
+		err = io.ErrUnexpectedEOF
+	}
+	received := progress.LiteralBytes + progress.ReusedBytes
+	if trailer := response.Trailer.Get("X-Ananas-Error"); trailer != "" {
+		return fmt.Errorf("download %q stopped after %d of %d bytes (NAS: %.256s): %w", path, received, expected, trailer, err)
+	}
+	return fmt.Errorf("download %q stopped after %d of %d bytes: %w", path, received, expected, err)
 }
 
 // DownloadVersion implements the replica downloader contract while retaining

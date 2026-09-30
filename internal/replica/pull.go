@@ -200,7 +200,7 @@ func (p *Puller) Pull(ctx context.Context, proposal journal.Proposal) (PullResul
 			}
 			result.Transfers[i], err = p.stage(ctx, e, bases[i])
 			if err != nil {
-				return err
+				return fmt.Errorf("receive NAS file %q: %w", e.Path, err)
 			}
 		}
 		return p.opts.Gate(ctx)

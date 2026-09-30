@@ -7,6 +7,15 @@ import (
 	"time"
 )
 
+// A configured disk-read ceiling is not a lower bound on network throughput.
+// Use the same conservative transfer rate as the replica/client deadline so a
+// fast NAS configuration does not cut off large transfers on slower LAN links.
+func transferTimeout(bytes, configuredRate int64) time.Duration {
+	rate := min(configuredRate, int64(2<<20))
+	seconds := (bytes + rate - 1) / rate
+	return 45*time.Second + time.Duration(seconds*8)*time.Second
+}
+
 // A request shares one budget for incoming wire and native content reads.
 // Waiting is coalesced over 64 KiB instead of creating a timer per small delta
 // frame. With reads capped at 64 KiB, initial/unpaced work is below 128 KiB.

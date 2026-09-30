@@ -360,3 +360,33 @@ func TestInventoryReaderWaitsForCurrentFileWithoutInterruptingIt(t *testing.T) {
 		t.Fatal("inventory did not start after file")
 	}
 }
+
+func TestTruncatedDownloadEOFIsRetryableAndPreservesNASFailure(t *testing.T) {
+	base, err := delta.Build(context.Background(), bytes.NewReader(nil), 0, 64*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := []byte("verified payload")
+	want := journal.Version{ID: identifier("truncated"), Size: int64(len(target)), Digest: hash.SumBytes(target)}
+	complete := encoded(t, nil, target)
+	for _, length := range []int{0, delta.HeaderBytes, len(complete) - 33} {
+		t.Run(fmt.Sprint(length), func(t *testing.T) {
+			c := clientWithPeer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Type", "application/octet-stream")
+				w.Header().Set("Trailer", "X-Ananas-Error")
+				w.WriteHeader(200)
+				w.Write(complete[:length])
+				w.Header().Set("X-Ananas-Error", "retained content or delta verification failed")
+			}))
+			var out bytes.Buffer
+			_, err := c.Download(context.Background(), Selection{"folder/movie.mp4", want.ID}, want, base, nil, &out)
+			if !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatal("stream EOF was not normalized", err)
+			}
+			if !strings.Contains(err.Error(), "folder/movie.mp4") || !strings.Contains(err.Error(), "NAS: retained content") {
+				t.Fatal("diagnostic context lost", err)
+			}
+		})
+	}
+}
