@@ -6,6 +6,8 @@ import re
 import threading
 import time
 
+from nas_sync_indicator import desktop_command
+
 import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, Gio, GLib, Pango
@@ -708,7 +710,7 @@ class Panel(Gtk.Application):
                 command += ["/usr/bin/env", "GSK_RENDERER=cairo"]
             command += ["/usr/bin/xdg-terminal-exec", "--dir=" + str(directory)]
             started = time.monotonic()
-            process = Gio.Subprocess.new(command, Gio.SubprocessFlags.NONE)
+            process = Gio.Subprocess.new(desktop_command(command), Gio.SubprocessFlags.NONE)
             process.wait_check_async(None, lambda source, result: self.terminal_done(source, result, directory, software, started))
         except GLib.Error as error:
             self.terminal_error(directory, error)
@@ -751,12 +753,12 @@ class Panel(Gtk.Application):
                     and error.matches(Gio.dbus_error_quark(), Gio.DBusError.NO_REPLY)):
                 print(f"Folder launch failed: {error}; retrying Nautilus with software rendering", flush=True)
                 try:
-                    process = Gio.Subprocess.new([
+                    process = Gio.Subprocess.new(desktop_command([
                         "/usr/bin/systemd-run", "--user", "--collect", "--quiet",
                         "--expand-environment=no",
                         "--property=Type=exec", "/usr/bin/env", "GSK_RENDERER=cairo",
                         "/usr/bin/nautilus", "--new-window", directory.as_uri(),
-                    ], Gio.SubprocessFlags.NONE)
+                    ]), Gio.SubprocessFlags.NONE)
                     process.wait_check_async(None, lambda source, result: self.directory_fallback_done(source, result, directory))
                     return
                 except GLib.Error as fallback_error:

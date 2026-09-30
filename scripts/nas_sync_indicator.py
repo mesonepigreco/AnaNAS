@@ -35,6 +35,16 @@ RECENT_SLOTS = 12
 ICON = "ananas-symbolic"
 
 
+def desktop_command(arguments):
+    """Launch literal arguments on systemd versions predating version 254.
+
+    The service manager expands dollars by default; doubling them is the
+    documented escape supported by older versions as well.
+    """
+    return [argument.replace('$', '$$') for argument in arguments
+            if argument != '--expand-environment=no']
+
+
 def icon_directory():
     """Directory holding the panel icon. The installer puts it in the user
     hicolor theme; older manual installs used a private anaNAS directory."""
@@ -502,25 +512,25 @@ class Indicator:
             self.changed()
         elif item_id == 21:
             try:
-                process = Gio.Subprocess.new([
+                process = Gio.Subprocess.new(desktop_command([
                     "/usr/bin/systemd-run", "--user", "--collect", "--quiet",
                     "--expand-environment=no", "--property=Type=exec",
                     "--property=MemoryMax=512M", "--property=CPUQuota=100%",
                     "/usr/bin/python3", str(Path(__file__).resolve()), "--setup",
-                ], Gio.SubprocessFlags.NONE)
+                ]), Gio.SubprocessFlags.NONE)
                 process.wait_check_async(None, self.setup_done)
             except GLib.Error:
                 self.action_done("Could not start QNAP setup. Run the anaNAS installer to repair the setup components.")
         elif item_id == 6:
             try:
-                process = Gio.Subprocess.new([
+                process = Gio.Subprocess.new(desktop_command([
                     "/usr/bin/systemd-run", "--user", "--collect", "--quiet",
                     "--expand-environment=no",
                     "--property=Type=exec", "--property=MemoryHigh=128M",
                     "--property=MemoryMax=192M", "--property=CPUQuota=50%",
                     "/usr/bin/python3", str(Path(__file__).resolve()),
                     "--control-panel", "--port", str(self.client.port), "--root", str(self.root),
-                ], Gio.SubprocessFlags.NONE)
+                ]), Gio.SubprocessFlags.NONE)
                 process.wait_check_async(None, self.panel_done)
             except GLib.Error as error:
                 self.panel_failed(error)
@@ -553,12 +563,12 @@ class Indicator:
                     # A separate unit keeps the file manager outside the panel's
                     # memory/CPU limits. No shell, global environment or default
                     # application changes; normal launches still use GIO.
-                    process = Gio.Subprocess.new([
+                    process = Gio.Subprocess.new(desktop_command([
                         "/usr/bin/systemd-run", "--user", "--collect", "--quiet",
                         "--expand-environment=no",
                         "--property=Type=exec", "/usr/bin/env", "GSK_RENDERER=cairo",
                         "/usr/bin/nautilus", "--new-window", self.root.as_uri(),
-                    ], Gio.SubprocessFlags.NONE)
+                    ]), Gio.SubprocessFlags.NONE)
                     process.wait_check_async(None,
                         lambda source, result: self.fallback_done(source, result, action))
                     return

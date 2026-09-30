@@ -250,8 +250,8 @@ class PanelTests(unittest.TestCase):
         with patch.object(Gio.Subprocess, 'new') as launch:
             panel.open_terminal('SampleDocuments/sub folder/$HOME')
             argv = launch.call_args.args[0]
-            self.assertIn('--expand-environment=no', argv)
-            self.assertEqual(argv[-2:], ['/usr/bin/xdg-terminal-exec', '--dir=/tmp/NASdir/SampleDocuments/sub folder/$HOME'])
+            self.assertNotIn('--expand-environment=no', argv)
+            self.assertEqual(argv[-2:], ['/usr/bin/xdg-terminal-exec', '--dir=/tmp/NASdir/SampleDocuments/sub folder/$$HOME'])
             launch.return_value.wait_check_async.assert_called_once()
             launch.reset_mock()
             panel.open_terminal('../outside')

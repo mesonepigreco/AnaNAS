@@ -7,6 +7,14 @@ from gi.repository import Gio, GLib
 
 
 class IndicatorTests(unittest.TestCase):
+    def test_desktop_launcher_supports_older_systemd_and_literal_dollars(self):
+        from nas_sync_indicator import desktop_command
+        self.assertEqual(desktop_command(['/usr/bin/systemd-run', '--user',
+                                         '--expand-environment=no', '/usr/bin/printf',
+                                         '/tmp/$HOME/${name}/file']),
+                         ['/usr/bin/systemd-run', '--user', '/usr/bin/printf',
+                          '/tmp/$$HOME/$${name}/file'])
+
     def test_default_launcher_uses_existing_wizard_profile(self):
         import json
         import tempfile

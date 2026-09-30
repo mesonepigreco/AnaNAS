@@ -61,6 +61,10 @@ func (m Monitor) Watch(ctx context.Context, ready chan<- struct{}) error {
 	if err != nil && !errors.Is(err, unix.ENODEV) {
 		return err
 	}
+	addresses, err := addressSnapshot(index)
+	if err != nil {
+		return fmt.Errorf("%w: address snapshot: %v", ErrUncertain, err)
+	}
 	// An absent interface waits for any link event, without offline polling.
 	wake, err := unix.Eventfd(0, unix.EFD_CLOEXEC|unix.EFD_NONBLOCK)
 	if err != nil {
@@ -127,7 +131,14 @@ func (m Monitor) Watch(ctx context.Context, ready chan<- struct{}) error {
 		if !ok || peer.Pid != 0 || flags&(unix.MSG_TRUNC|unix.MSG_CTRUNC) != 0 || n <= 0 || n > len(buffer) {
 			return fmt.Errorf("%w: source or truncation", ErrUncertain)
 		}
-		changed, err := relevant(buffer[:n], index)
+		raw, err := withoutAddressRefreshes(buffer[:n], addresses)
+		if err != nil {
+			return err
+		}
+		if len(raw) == 0 {
+			continue // Known lifetime refreshes do not exhaust the uncertainty budget.
+		}
+		changed, err := relevant(raw, index)
 		if err != nil {
 			return err
 		}
