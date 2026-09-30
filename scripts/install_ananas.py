@@ -112,6 +112,17 @@ def terminal():
         share = inventory["shares"][int(input("Share number: ")) - 1]
         folder = input("New sync directory [anaNAS] (enter '-' for the entire share): ").strip() or "anaNAS"
         folder = "" if folder == "-" else folder
+        root = share["path"] + ("/" + setup.identifier(folder) if folder else "")
+        managed = setup.managed_helper(inventory, root)
+        if managed:
+            print("This folder is already synchronized by a NAS helper. This PC can be added to it.")
+            local = input("New/empty local folder: ").strip()
+            helper = setup.read_helper(session, managed)
+            plan = setup.make_join_plan(session, inventory, share, local, managed, helper)
+            print("NAS:", plan["nasRoot"], "\nPC:", plan["localRoot"])
+            if input("Add this PC to that helper and start sync? [y/N] ").lower() == "y":
+                print(setup.join(session, inventory, plan, helper, print)["message"])
+            return
         for index, item in enumerate(inventory["accounts"], 1):
             print(index, item["name"])
         account = inventory["accounts"][int(input("Non-admin runtime account number: ")) - 1]

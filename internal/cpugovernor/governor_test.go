@@ -1,6 +1,7 @@
 package cpugovernor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -69,5 +70,44 @@ func TestOverlappingTaskRestoresOlderTier(t *testing.T) {
 	waitPercent(t, g, 10)
 	if err := g.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestOpenReportsAnUndelegatedCPUControllerAsUnavailable(t *testing.T) {
+	root := t.TempDir()
+	membership := filepath.Join(root, "cgroup")
+	if err := os.WriteFile(membership, []byte("0::/user.slice/app.slice/ananas.service\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Distributions before systemd 252 delegate only memory and pids, so the
+	// service cgroup exists with no cpu.max in it.
+	service := filepath.Join(root, "user.slice/app.slice/ananas.service")
+	if err := os.MkdirAll(service, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := open(membership, root); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("undelegated cpu controller: err = %v, want ErrUnavailable", err)
+	}
+	if err := os.WriteFile(filepath.Join(service, "cpu.max"), []byte("max 100000\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	g, err := open(membership, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	if g.Percent() != 10 {
+		t.Fatalf("idle tier = %d, want 10", g.Percent())
+	}
+}
+
+func TestOpenReportsAMissingUnifiedCgroupAsUnavailable(t *testing.T) {
+	root := t.TempDir()
+	membership := filepath.Join(root, "cgroup")
+	if err := os.WriteFile(membership, []byte("1:name=systemd:/legacy\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := open(membership, root); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("cgroup v1 host: err = %v, want ErrUnavailable", err)
 	}
 }

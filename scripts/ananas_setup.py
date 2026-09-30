@@ -226,7 +226,9 @@ def validate_local(path, existing=None):
     root = Path(path).expanduser()
     if not root.is_absolute() or root.resolve() != root or root == Path.home() or root == Path("/"):
         raise SetupError("Choose an absolute, non-symlink folder, not your entire home or filesystem.")
-    for profile in profiles() if existing is None else existing:
+    # An attempt that never finished synchronizes nothing, so it must not reserve a
+    # folder name; the setup that replaces it discards its record first.
+    for profile in [item for item in profiles() if not incomplete_attempt(item)] if existing is None else existing:
         other = Path(profile["local"]["root"])
         if root == other or root in other.parents or other in root.parents:
             raise SetupError(f"This overlaps an existing sync folder: {other}. Choose a separate folder.")
@@ -539,7 +541,7 @@ def make_plan(session, inventory, share, folder, local, account, *, relative='')
     for managed in inventory["managed"]:
         other = managed["root"].rstrip("/")
         if root == other or root.startswith(other + "/") or other.startswith(root + "/"):
-            raise SetupError("This directory is already managed by anaNAS. Use its existing local configuration; adding another PC to a legacy helper requires certificate enrollment.")
+            raise SetupError("This directory is already synchronized by an anaNAS helper. To synchronize it on this PC too, add this PC to that helper instead of installing a second one.")
     local = validate_local(local)
     key = hashlib.sha256((session.host + "/" + root).encode()).hexdigest()[:16]
     base = str(Path(share["path"]).parent / (".ananas-" + key))
@@ -558,6 +560,374 @@ def make_plan(session, inventory, share, folder, local, account, *, relative='')
             "base": base, "account": account, "port": port, "webPort": web,
             "profile": str(profile), "mountPoint": "/mnt/ananas-" + key,
             "uid": os.getuid(), "gid": os.getgid(), "username": __import__('pwd').getpwuid(os.getuid()).pw_name}
+
+
+def remote(session, description, command, **arguments):
+    """One NAS command, reported with the step that failed rather than as a bare
+    connection error. Setup messages stay free of command output."""
+    try:
+        return session.command(command, **arguments)
+    except SetupError as error:
+        raise SetupError(f"The NAS step '{description}' did not complete. {error}") from None
+
+
+def managed_helper(inventory, path):
+    """The installed helper whose synchronized root is exactly this directory."""
+    path = path.rstrip("/")
+    return next((item for item in inventory["managed"] if item["root"].rstrip("/") == path), None)
+
+
+def read_helper(session, managed):
+    """Read an installed helper's configuration and trust material, changing nothing."""
+    base = managed["base"]
+    if not base.startswith("/share/") or "\n" in base or base != str(PurePosixPath(base)):
+        raise SetupError("This helper's installation path is not supported for adding a PC.")
+    q = shlex.quote
+    try:
+        config = json.loads(session.command("head -c 65536 " + q(base + "/helper.json"), admin=True))
+        certificate = config["certificate"]
+        client_ca = config["clientCA"]
+        if not isinstance(certificate, str) or not isinstance(client_ca, str):
+            raise ValueError()
+    except (ValueError, KeyError, TypeError):
+        raise SetupError("The installed anaNAS helper configuration could not be read. It has not been changed.") from None
+    service = session.command("head -c 65536 " + q(base + "/service.sh"), admin=True)
+    rules = firewall_rules(service, config.get("peers", []))
+    if not rules:
+        raise SetupError("The installed helper's startup script does not grant its PC a recognizable firewall rule, "
+                         "so this PC cannot be added automatically. It has not been changed.")
+    saved = {}
+    for name, path in (("config", base + "/helper.json"), ("ca", client_ca), ("service", base + "/service.sh")):
+        # Present only when an earlier attempt from some PC saved the originals.
+        if session.command("test -e " + q(path + ".before-enroll") + " && echo yes || true", admin=True).strip() == "yes":
+            saved[name] = session.command("head -c 65536 " + q(path + ".before-enroll"), admin=True)
+    try:
+        original = json.loads(saved["config"]) if "config" in saved else None
+    except ValueError:
+        original = None
+    return {"config": config, "service": service, "rules": rules, "original": original,
+            "originalCA": saved["ca"].encode() if "ca" in saved else None,
+            "originalService": saved.get("service"),
+            "ca": session.command("head -c 65536 " + q(client_ca), admin=True).encode(),
+            "server": session.command("head -c 65536 " + q(certificate), admin=True).encode()}
+
+
+def firewall_rules(service, peers):
+    """The startup script's per-PC accept rules, whichever chains and directions it
+    uses. A new PC is granted exactly what an enrolled PC already has, no more."""
+    rules = []
+    for match in re.finditer(r"^([ \t]*)(/sbin/iptables -A ([A-Za-z0-9_-]{1,28}) [^\n]*-j ACCEPT)[ \t]*$", service, re.M):
+        peer = next((item for item in peers if re.search(r"(?<![0-9.])" + re.escape(item) + r"(?![0-9.])", match.group(2))), None)
+        if peer:
+            rules.append({"indent": match.group(1), "text": match.group(2), "chain": match.group(3),
+                          "peer": peer, "end": match.end()})
+    return rules
+
+
+def join_certificates(directory, source):
+    """A PC-local issuer and client leaf. The NAS additionally trusts this issuer,
+    so no existing private key ever leaves the PC that first installed the helper."""
+    def openssl(*args):
+        return run(["openssl", *args], timeout=20)
+    ca = str(directory / "client-ca")
+    openssl("req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
+            "-keyout", ca + ".key", "-out", ca + ".pem", "-days", "3650",
+            "-subj", "/CN=anaNAS client CA " + secrets.token_hex(8))
+    stem = str(directory / "client")
+    openssl("req", "-new", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
+            "-keyout", stem + ".key", "-out", stem + ".csr", "-subj", "/CN=anaNAS client")
+    private_write(stem + ".ext", f"subjectAltName=IP:{source}\nextendedKeyUsage=clientAuth\nkeyUsage=digitalSignature\n".encode())
+    openssl("x509", "-req", "-in", stem + ".csr", "-CA", ca + ".pem", "-CAkey", ca + ".key",
+            "-CAcreateserial", "-out", stem + ".pem", "-days", "365", "-extfile", stem + ".ext")
+    pin = hashlib.sha256(openssl("x509", "-in", stem + ".pem", "-outform", "DER")).hexdigest()
+    for path in directory.iterdir():
+        path.chmod(0o600)
+    return pin
+
+
+def state_home(identifier):
+    return Path.home() / ".local/state/nas-sync" / identifier
+
+
+def release_state(identifier):
+    """Remove synchronization state that no configured profile claims. The index is
+    bound to the local folder that created it, so state left by an abandoned attempt
+    makes the next one fail with a mismatched root."""
+    state = state_home(identifier)
+    if state.exists() and not any(Path(profile.get("stateDir", "")) == state for profile in profiles()):
+        shutil.rmtree(state, ignore_errors=True)
+
+
+def incomplete_attempt(profile):
+    """True when a profile's saved record shows setup never finished."""
+    record = Path(profile["_config"]).with_name("setup.json") if isinstance(profile, dict) else Path(profile) / "setup.json"
+    try:
+        if record.stat().st_size > 65536:
+            return True
+        return json.loads(record.read_bytes()).get("phase") != "started"
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True
+
+
+def discard_attempt(profile):
+    """Remove an unfinished local setup so it can be started again. The NAS, its
+    helper and the local folder's contents are not touched."""
+    directory = Path(profile["_config"]).parent if isinstance(profile, dict) else Path(profile)
+    if directory.parent != config_home() / "profiles" or not incomplete_attempt(directory):
+        raise SetupError("Only an unfinished setup for an additional folder can be discarded here.")
+    identifier = directory.name
+    service = "ananas-sync-" + identifier + ".service"
+    unit = Path.home() / ".config/systemd/user" / service
+    if unit.exists():
+        for arguments in (["disable", "--now", service], ["daemon-reload"]):
+            try:
+                run(["systemctl", "--user", *arguments])
+            except SetupError:
+                pass
+        unit.unlink(missing_ok=True)
+    shutil.rmtree(directory)
+    release_state(identifier)
+
+
+def staged_attempt(profile):
+    """True when a saved attempt stopped before the NAS was changed."""
+    try:
+        record = Path(profile) / "setup.json"
+        if record.stat().st_size > 65536:
+            return False
+        return json.loads(record.read_bytes()).get("phase") == "staging"
+    except (OSError, ValueError):
+        return False
+
+
+def make_join_plan(session, inventory, share, local, managed, helper):
+    """Pure validation before this PC is added to an installed helper."""
+    if share not in inventory["shares"]:
+        raise SetupError("Select the accessible share that contains this synchronized folder.")
+    config, root = helper["config"], managed["root"]
+    if not root.startswith(share["path"].rstrip("/") + "/") and root != share["path"].rstrip("/"):
+        raise SetupError("This synchronized folder is not inside the selected share. Choose the share that contains it.")
+    source = session.route["source"]
+    original = helper.get("original")
+    # An unfinished attempt from this PC left its address behind. The saved originals
+    # let that attempt be undone and redone cleanly instead of refusing forever.
+    repair = bool(source in config.get("peers", []) and original and source not in original.get("peers", []))
+    if source in config.get("peers", []) and not repair:
+        raise SetupError("This PC's address is already allowed by that helper. If sync is not configured here, remove the stale entry on the NAS before retrying.")
+    if len(config.get("peers", [])) >= 64 or len(config.get("clients", {})) >= 64:
+        raise SetupError("That helper already has the maximum number of enrolled PCs.")
+    try:
+        prefix = ipaddress.IPv4Network(config["prefix"])
+        if ipaddress.IPv4Address(source) not in prefix:
+            raise SetupError("This PC is not on the subnet that helper serves. Connect both machines to the same directly connected LAN.")
+        port = int(config["listen"].rsplit(":", 1)[1])
+        if not 1024 <= port < 65536:
+            raise SetupError("That helper listens on a port this PC cannot be configured to reach.")
+        namespace = config["namespace"]
+        account = {"uid": int(config["uid"]), "gid": int(config["gid"])}
+    except (KeyError, ValueError, ipaddress.AddressValueError):
+        raise SetupError("The installed helper configuration is incomplete. It has not been changed.") from None
+    if not re.fullmatch(r"[0-9a-f]{64}", str(namespace)):
+        raise SetupError("The installed helper has no usable synchronization namespace. It has not been changed.")
+    local = validate_local(local)
+    key = hashlib.sha256((session.host + "/" + root).encode()).hexdigest()[:16]
+    profile = config_home() / "profiles" / key
+    # The helper's own peer list is checked above, so an attempt recorded as staged
+    # changed nothing on the NAS and can simply be replaced. A later phase means the
+    # NAS was touched, and that record is for a person to read before retrying.
+    if profile.exists() and staged_attempt(profile):
+        shutil.rmtree(profile)
+    if profile.exists():
+        raise SetupError("A previous setup attempt for this folder reached the NAS. Inspect its saved recovery record at "
+                         + str(profile / "setup.json") + " before retrying.")
+    release_state(key)
+    if any(p.get("sync", {}).get("port") == port and p.get("nas", {}).get("host") == session.host for p in profiles()):
+        raise SetupError("This PC already has a profile for that helper. Open its control panel instead.")
+    web_used = {p.get("webPort") for p in profiles()}
+    web = next(value for value in range(8721, 8821) if value not in web_used)
+    return {"id": key, "host": session.host, "route": session.route, "share": share["name"],
+            "nasRoot": root, "createFolder": False, "localRoot": str(local), "join": True, "repair": repair,
+            "base": managed["base"], "account": account, "port": port, "webPort": web,
+            "namespace": namespace, "profile": str(profile), "mountPoint": "/mnt/ananas-" + key,
+            "uid": os.getuid(), "gid": os.getgid(), "username": __import__('pwd').getpwuid(os.getuid()).pw_name}
+
+
+def join(session, inventory, plan, helper, progress=lambda message: None):
+    try:
+        return _join(session, inventory, plan, helper, progress)
+    except Exception as error:
+        message = str(error) if isinstance(error, SetupError) else "A step could not complete while adding this PC. The NAS helper and the other PC were not reconfigured."
+        record = Path(plan["profile"]) / "setup.json"
+        if record.exists():
+            message += " A partial setup was preserved for recovery at " + str(record) + ". Do not create a competing setup for this directory."
+        raise SetupError(message) from None
+
+
+def _join(session, inventory, plan, helper, progress):
+    """Add this PC to an installed helper. The synchronized directory, the helper's
+    own identity and every already-enrolled PC are left exactly as they are."""
+    progress("Checking the NAS helper and the selected folder…")
+    validate_local(plan['localRoot'])
+    if session.route != lan(session.host):
+        raise SetupError("The LAN connection changed. Reconnect and try again.")
+    q = shlex.quote
+    base, root, source = plan["base"], plan["nasRoot"], plan["route"]["source"]
+    config = dict(helper["original"] if plan.get("repair") and helper.get("original") else helper["config"])
+    if config.get("root") != root:
+        raise SetupError("The installed helper no longer serves this directory. Refresh the folder list and retry.")
+    if source in config.get("peers", []):
+        raise SetupError("This PC is already allowed by that helper. It has not been changed.")
+    profile = Path(plan["profile"])
+    profile.mkdir(mode=0o700, parents=True)
+    record = profile / "setup.json"
+    atomically(record, json.dumps({"phase": "staging", "plan": plan}, indent=2).encode())
+    local = Path(plan["localRoot"])
+    local.mkdir(mode=0o700, parents=True, exist_ok=True)
+    tls = profile / "tls"
+    tls.mkdir(mode=0o700)
+    # The helper verifies this PC against the issuer bundle it already trusts; this
+    # PC verifies the helper with the issuer that signed the certificate it serves.
+    private_write(tls / "ca.pem", helper["ca"])
+    server_pin = hashlib.sha256(run(["openssl", "x509", "-outform", "DER"], data=helper["server"], timeout=20)).hexdigest()
+    pc_config = {"local": {"root": str(local)}, "nas": {"host": session.host, "share": plan["share"],
+                 "mountPoint": plan["mountPoint"], "protocol": "smb", "interface": session.route["interface"], "prefix": session.route["prefix"]},
+                 "stateDir": str(Path.home() / ".local/state/nas-sync" / plan["id"]), "webPort": plan["webPort"], "lanGuard": True,
+                 "selectiveSync": {"excludeLocal": [], "excludeRemote": ["/@Recycle/"]},
+                 "limits": {"scanOpsPerSecond": 10000, "readBytesPerSecond": 1073741824, "cacheBytes": 1099511627776, "maxWatches": 100000}}
+    config_path = profile / "config.json"
+    atomically(config_path, json.dumps(pc_config).encode())
+    binary = Path.home() / ".local/bin/nas-sync"
+    identity = json.loads(run([str(binary), "-config", str(config_path), "-client-identity"]))["clientID"]
+    pin = join_certificates(tls, source)
+    if pin in config.get("clients", {}) or identity in config.get("clients", {}).values():
+        raise SetupError("That helper already lists this PC's identity. Remove the stale entry on the NAS before retrying.")
+    pc_config["sync"] = {"enabled": True, "port": plan["port"], "source": source,
+                         "namespace": plan["namespace"], "replicaNamespace": secrets.token_hex(32),
+                         "certificate": str(tls / "client.pem"), "privateKey": str(tls / "client.key"), "ca": str(tls / "ca.pem"),
+                         "serverFingerprint": server_pin, "maxFileBytes": config.get("maxFileBytes", 8589934592),
+                         "maxBatchBytes": config.get("maxBatchBytes", 8589934592), "maxCacheEntries": 1000000}
+    owner = f"{plan['account']['uid']}:{plan['account']['gid']}"
+    check = shlex.join(["/bin/busybox", "start-stop-daemon", "-S", "-c", owner, "-x", base + "/helper",
+                        "--", "-config", base + "/helper.json", "-check-config"])
+    # Everything this transaction depends on is exercised while the helper is still
+    # untouched, so an unusable NAS stops the setup before anything is modified.
+    progress("Checking what this NAS supports…")
+    for program in ("sha256sum", "cp", "mv", "chown"):
+        remote(session, f"looking for {program}", "command -v " + q(program), admin=True)
+    remote(session, "checking the helper's firewall command", "test -x /sbin/iptables", admin=True)
+    for path in (config["clientCA"], base + "/helper.json", base + "/service.sh"):
+        remote(session, "checking " + Path(path).name, "set -eu; test -f " + q(path) + "; test -w " + q(path), admin=True)
+    try:
+        session.command(check, admin=True)
+        verifiable = True
+    except SetupError:
+        verifiable = False
+    progress("Adding this PC to the NAS helper's allowed list…")
+    config["peers"] = list(config.get("peers", [])) + [source]
+    config["clients"] = dict(config.get("clients", {}), **{pin: identity})
+    # Two PCs each need their own connection and notification stream.
+    config["maxConnections"] = max(int(config.get("maxConnections", 2)), min(8, 2 * len(config["peers"])))
+    # Recorded before the first change, so a later failure never reports the NAS as untouched.
+    atomically(record, json.dumps({"phase": "nas-updating", "plan": plan}, indent=2).encode())
+    for path, data in ((config["clientCA"], None), (base + "/helper.json", json.dumps(config).encode())):
+        backup = path + ".before-enroll"
+        # Kept from the first attempt only, so a retry never overwrites the pristine
+        # copy, and a retry's bundle is rebuilt from it rather than appended twice.
+        remote(session, "saving the original " + Path(path).name,
+               "set -eu; test -e " + q(backup) + " || cp -p " + q(path) + " " + q(backup), admin=True)
+        if data is None:
+            pristine = helper.get("originalCA") or remote(session, "reading the original " + Path(path).name,
+                                                          "head -c 65536 " + q(backup), admin=True).encode()
+            data = (pristine if pristine.endswith(b"\n") else pristine + b"\n") + (tls / "client-ca.pem").read_bytes()
+        temporary = path + ".enroll-new"
+        remote(session, "writing " + Path(path).name,
+               "set -eu; umask 077; rm -f " + q(temporary) + "; cat > " + q(temporary) +
+               "; chmod 600 " + q(temporary) + "; chown " + owner + " " + q(temporary) +
+               "; mv " + q(temporary) + " " + q(path), admin=True, data=data, timeout=120)
+        verified = remote(session, "verifying " + Path(path).name, "sha256sum " + q(path), admin=True)
+        if verified.split()[0] != hashlib.sha256(data).hexdigest():
+            raise SetupError("An updated helper file did not pass its integrity check. The helper was not restarted.")
+    if verifiable:
+        remote(session, "checking the updated helper configuration", check, admin=True)
+    atomically(record, json.dumps({"phase": "nas-updated", "plan": plan}, indent=2).encode())
+    progress("Preparing saved-credential mounting and PC autostart (administrator confirmation)…")
+    system_plan = dict(plan, password=session.password, nasUsername=session.username)
+    run(["pkexec", "/usr/bin/python3", str(bundle_home() / "ananas_setup_system.py"), "--install"],
+        data=json.dumps(system_plan).encode(), timeout=180)
+    atomically(record, json.dumps({"phase": "pc-prepared", "plan": plan}, indent=2).encode())
+    progress("Allowing this PC through the NAS firewall and restarting the helper…")
+    # Each chain the script already uses gains one rule for this PC, mirroring the
+    # enrolled PC's own rule so inbound and outbound treatment stay identical. The
+    # chains persist until the NAS reboots, so the running rule set is updated as
+    # well as the startup script that rebuilds it.
+    service = helper["originalService"] if plan.get("repair") and helper.get("originalService") else helper["service"]
+    rules, added = firewall_rules(service, config.get("peers", [])), []
+    if plan.get("repair"):
+        rules = [rule for rule in rules if rule["peer"] != source]
+    for rule in sorted(rules, key=lambda item: item["end"], reverse=True):
+        text = re.sub(r"(?<![0-9.])" + re.escape(rule["peer"]) + r"(?![0-9.])", source, rule["text"])
+        if text == rule["text"] or source not in text:
+            raise SetupError("The installed helper's firewall rules could not be extended to this PC. They have not been changed.")
+        if text in service:
+            raise SetupError("The installed helper's startup script already allows this PC. It has not been changed.")
+        arguments = text.split(" -A ", 1)[1]
+        remote(session, "allowing this PC in chain " + rule["chain"],
+               "set -eu; /sbin/iptables -C " + arguments + " 2>/dev/null || /sbin/iptables -I " +
+               arguments.replace(rule["chain"], rule["chain"] + " 1", 1), admin=True)
+        service = service[:rule["end"]] + "\n" + rule["indent"] + text + service[rule["end"]:]
+        added.append(text)
+    if not added:
+        raise SetupError("The installed helper's startup script could not be updated. This PC was not enrolled.")
+    script = base + "/service.sh"
+    remote(session, "saving the original service.sh",
+           "set -eu; test -e " + q(script + ".before-enroll") + " || cp -p " + q(script) + " " + q(script + ".before-enroll"), admin=True)
+    remote(session, "writing service.sh",
+           "set -eu; umask 077; rm -f " + q(script + ".enroll-new") + "; cat > " + q(script + ".enroll-new") +
+           "; chmod 755 " + q(script + ".enroll-new") + "; chown 0:0 " + q(script + ".enroll-new") +
+           "; mv " + q(script + ".enroll-new") + " " + q(script), admin=True, data=service.encode(), timeout=120)
+    remote(session, "stopping the helper", q(script) + " stop || true", admin=True)
+    time.sleep(1)
+    try:
+        session.command(q(script) + " start", admin=True)
+        time.sleep(1)
+        session.command(q(script) + " status", admin=True)
+    except SetupError:
+        # The already-enrolled PC must not lose its helper because this PC failed
+        # to join: restore the saved originals and start the helper as it was.
+        restored = []
+        for path in (config["clientCA"], base + "/helper.json", script):
+            try:
+                session.command("set -eu; test -e " + q(path + ".before-enroll") + " && cp -p " +
+                                q(path + ".before-enroll") + " " + q(path), admin=True)
+                restored.append(Path(path).name)
+            except SetupError:
+                pass
+        try:
+            session.command(q(script) + " stop || true", admin=True)
+            session.command(q(script) + " start", admin=True)
+            session.command(q(script) + " status", admin=True)
+        except SetupError:
+            raise SetupError("The NAS helper did not restart after this PC was added, and could not be restored automatically. "
+                             "Its original files are saved beside it with the suffix .before-enroll; restore them on the NAS and "
+                             "run " + script + " start.") from None
+        raise SetupError("The NAS helper did not restart after this PC was added, so its previous configuration was restored (" +
+                         ", ".join(restored) + ") and it is running again. This PC was not enrolled.") from None
+    atomically(config_path, json.dumps(pc_config, indent=2).encode())
+    progress("Starting this folder's sync daemon…")
+    if local.resolve() != local or any(local.iterdir()):
+        raise SetupError('The local folder changed during setup or is no longer empty. Sync was not started; choose an empty folder before recovering this setup.')
+    services = Path.home() / ".config/systemd/user"
+    services.mkdir(parents=True, exist_ok=True)
+    service_name = "ananas-sync-" + plan["id"] + ".service"
+    private_write(services / service_name, service_text(binary, config_path).encode(), 0o644)
+    run(["systemctl", "--user", "daemon-reload"])
+    run(["systemctl", "--user", "enable", "--now", service_name])
+    atomically(record, json.dumps({"phase": "started", "plan": plan}, indent=2).encode())
+    return {"message": "This PC was added to the existing NAS folder. Its contents will download into " + str(local) +
+                       ", and changes on either PC now synchronize through the NAS.",
+            "profile": str(config_path), "service": service_name}
 
 
 def install(session, inventory, plan, progress=lambda message: None):

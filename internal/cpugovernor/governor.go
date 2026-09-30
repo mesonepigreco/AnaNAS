@@ -4,7 +4,9 @@ package cpugovernor
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +16,13 @@ import (
 )
 
 const period int64 = 100000
+
+// ErrUnavailable reports that this system does not expose a writable cpu.max for
+// the current service, so CPU bursts cannot be governed. Distributions delegate
+// the cpu controller to user services only from systemd 252. Callers run without
+// CPU throttling rather than failing: the governor bounds work, it does not
+// perform it.
+var ErrUnavailable = errors.New("service CPU control unavailable")
 
 type Governor struct {
 	file    *os.File
@@ -28,7 +37,11 @@ type Governor struct {
 }
 
 func Open() (*Governor, error) {
-	f, err := os.Open("/proc/self/cgroup")
+	return open("/proc/self/cgroup", "/sys/fs/cgroup")
+}
+
+func open(membership, root string) (*Governor, error) {
+	f, err := os.Open(membership)
 	if err != nil {
 		return nil, err
 	}
@@ -45,9 +58,12 @@ func Open() (*Governor, error) {
 		return nil, err
 	}
 	if group == "" || filepath.Clean(group) != group || strings.HasPrefix(group, "../") {
-		return nil, fmt.Errorf("unified service cgroup unavailable")
+		return nil, fmt.Errorf("%w: no unified service cgroup", ErrUnavailable)
 	}
-	file, err := os.OpenFile(filepath.Join("/sys/fs/cgroup", group, "cpu.max"), os.O_WRONLY, 0)
+	file, err := os.OpenFile(filepath.Join(root, group, "cpu.max"), os.O_WRONLY, 0)
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) {
+		return nil, fmt.Errorf("%w: the cpu controller is not delegated to this service", ErrUnavailable)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("open service CPU control: %w", err)
 	}

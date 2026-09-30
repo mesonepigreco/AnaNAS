@@ -11,7 +11,7 @@ import (
 // RequireBudgetBootstrap optionally permits an existing observer index. Only
 // its exact metadata is inspected; caller retains the index lock and must not
 // interpret this check as validation of its outbox or replica history.
-// It reads at most two/three names in the private native state directory, never
+// It reads at most two/four names in the private native state directory, never
 // a visible root. Its separate descriptor preserves other enumeration positions.
 func (s *Store) RequireBudgetBootstrap(replica bool) error {
 	fd, err := unix.Openat(s.fd, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
@@ -22,7 +22,7 @@ func (s *Store) RequireBudgetBootstrap(replica bool) error {
 	defer f.Close()
 	limit := 2
 	if replica {
-		limit = 3
+		limit = 4
 	}
 	names, err := f.Readdirnames(limit)
 	if err != nil && err != io.EOF {
@@ -34,7 +34,10 @@ func (s *Store) RequireBudgetBootstrap(replica bool) error {
 			journal = true
 			continue
 		}
-		if !replica || name != "index.db" {
+		// A replica also keeps its observer index and transfer history beside the
+		// journal. Neither holds content or replica history the budget accounts
+		// for, and the daemon opens the history before synchronization starts.
+		if !replica || (name != "index.db" && name != "traffic.db") {
 			return fmt.Errorf("budget initialization found unaccounted state")
 		}
 		var st unix.Stat_t
@@ -42,7 +45,7 @@ func (s *Store) RequireBudgetBootstrap(replica bool) error {
 			return err
 		}
 		if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Mode&0777 != 0600 || st.Uid != uint32(os.Geteuid()) || st.Nlink != 1 {
-			return fmt.Errorf("invalid observer index metadata")
+			return fmt.Errorf("invalid private state metadata for %s", name)
 		}
 	}
 	if !journal {

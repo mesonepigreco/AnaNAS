@@ -45,7 +45,9 @@ def validate(plan):
         raise ValueError("a bounded direct subnet and the NAS certificate pin are required")
     if not re.fullmatch(r"[^/\\\n\r\x00,]{1,80}", plan["share"]):
         raise ValueError("unsupported SMB share name")
-    if plan["mountPoint"] != "/mnt/ananas-" + key or type(plan["port"]) is not int or not 18742 <= plan["port"] < 18842:
+    # Wizard instances allocate 18742+; helpers installed by earlier deployments
+    # use their own unprivileged port, which a PC joining them must be able to reach.
+    if plan["mountPoint"] != "/mnt/ananas-" + key or type(plan["port"]) is not int or not 1024 <= plan["port"] < 65536:
         raise ValueError("invalid mount or helper port")
     if "PKEXEC_UID" in os.environ and int(os.environ["PKEXEC_UID"]) != uid:
         raise ValueError("plan does not belong to the caller")

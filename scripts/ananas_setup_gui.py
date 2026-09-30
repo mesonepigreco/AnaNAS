@@ -398,6 +398,12 @@ class Wizard(Gtk.ApplicationWindow):
     def destination_page(self, share, relative, path, new_name=''):
         self.chosen_share, self.chosen_relative = share, relative
         self.existing_profile = backend.local_profile(self.session.host, path, self.inventory['shares']) if not new_name else None
+        # An unfinished attempt is not a working configuration: it must be discardable
+        # rather than offered as one, or this folder cannot be set up at all.
+        self.unfinished_profile = None
+        if self.existing_profile and backend.incomplete_attempt(self.existing_profile):
+            self.unfinished_profile, self.existing_profile = self.existing_profile, None
+        self.chosen_managed = backend.managed_helper(self.inventory, path) if not new_name and not self.existing_profile else None
         old = self.stack.get_child_by_name('destination')
         if old:
             self.stack.remove(old)
@@ -406,7 +412,8 @@ class Wizard(Gtk.ApplicationWindow):
         self.label(box, 'Selected NAS folder: ' + path)
         self.label(box, backend.sync_tag(path, self.inventory['managed']))
         self.folder = self.field(box, 'Create a new subfolder (optional; leave blank to use the selected folder)', new_name)
-        local = self.existing_profile['local']['root'] if self.existing_profile else str(Path.home() / 'QNAP' / (new_name or Path(path).name))
+        previous = self.existing_profile or self.unfinished_profile
+        local = previous['local']['root'] if previous else str(Path.home() / 'QNAP' / (new_name or Path(path).name))
         self.local = self.field(box, 'Save this folder on your PC at', local)
         choose = self.button(box, 'Choose local folder…', self.choose_local)
         advanced = Gtk.Expander(label='Advanced setup options')
@@ -423,8 +430,21 @@ class Wizard(Gtk.ApplicationWindow):
         self.save.set_active(True)
         options.pack_start(self.save, False, False, 0)
         self.label(box, "Only the selected directory is synchronized, in both directions. Existing setups are preserved.\nAdvanced exclusions and resource limits can be adjusted in the generated profile.\nCurrent engine limits: 64 MiB per file; conflict choices and whole-directory deletion are still in development.")
-        self.button(box, "Enable existing sync" if self.existing_profile else "Review and start sync", self.review)
+        self.button(box, "Enable existing sync" if self.existing_profile else
+                    ("Add this PC to this synchronized folder" if self.chosen_managed else "Review and start sync"), self.review)
         self.button(box, "Back to shared folders", lambda _: self.stack.set_visible_child_name("folders"))
+        if self.unfinished_profile:
+            self.label(box, 'An earlier attempt to set up this folder on this PC did not finish, so it is not synchronizing. '
+                            'Discard it to try again. This removes only the unfinished local setup: the NAS folder, its helper '
+                            'and any files already in the local folder are left alone.')
+            self.button(box, 'Discard the unfinished attempt', self.discard)
+        if self.chosen_managed:
+            self.label(box, 'This folder is already synchronized by a NAS helper for another PC. Continuing adds this PC to that same helper, '
+                            'so both PCs synchronize the same directory through the NAS. The NAS folder and the other PC keep their contents and settings.\n'
+                            'Choose an empty local folder: its current NAS contents download here first. The helper restarts briefly, and the other PC reconnects on its own.')
+            self.folder.set_text('')
+            self.folder.set_sensitive(False)
+            advanced.set_sensitive(False)
         if self.existing_profile:
             self.label(box, 'This folder is already configured on this PC. Continuing reuses its existing daemon and certificates; it does not install another helper.')
             self.folder.set_sensitive(False)
@@ -451,6 +471,11 @@ class Wizard(Gtk.ApplicationWindow):
         if self.existing_profile:
             self.service(self.existing_profile, True)
             return
+        if self.chosen_managed:
+            managed, local = self.chosen_managed, self.local.get_text().strip()
+            self.work(lambda: self.prepare_join(managed, local), self.confirm_join,
+                      'Reading the installed NAS helper…')
+            return
         try:
             if not self.save.get_active():
                 raise backend.SetupError("Unattended mounting requires the saved SMB login. No credential has been saved yet.")
@@ -473,6 +498,41 @@ class Wizard(Gtk.ApplicationWindow):
             self.installing = True
             self.work(lambda: backend.install(self.session, self.inventory, plan,
                       lambda message: GLib.idle_add(self.progress, message)), self.installed, "Preparing installation…")
+
+    def discard(self, _):
+        profile = self.unfinished_profile
+        dialog = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
+                                   buttons=Gtk.ButtonsType.OK_CANCEL, text="Discard the unfinished setup for this folder?")
+        dialog.format_secondary_text("Its saved settings and certificates are removed from this PC so the folder can be set up again.\n"
+                                     "The NAS, its helper and the contents of " + profile['local']['root'] + " are not changed.")
+        accepted = dialog.run() == Gtk.ResponseType.OK
+        dialog.destroy()
+        if accepted:
+            self.work(lambda: backend.discard_attempt(profile), self.discarded, "Discarding the unfinished setup…")
+
+    def discarded(self, _):
+        self.status.set_text("The unfinished setup was discarded. Choose the folder again to set it up.")
+        self.work(lambda: self.session.inventory(), self.folders_page, "Reading shared folders…")
+
+    def prepare_join(self, managed, local):
+        """Read the installed helper and validate before anything is changed."""
+        helper = backend.read_helper(self.session, managed)
+        return backend.make_join_plan(self.session, self.inventory, self.chosen_share, local, managed, helper), helper
+
+    def confirm_join(self, prepared):
+        plan, helper = prepared
+        dialog = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
+                                   buttons=Gtk.ButtonsType.OK_CANCEL, text="Add this PC to this synchronized folder?")
+        dialog.format_secondary_text(f"NAS: {plan['host']}:{plan['nasRoot']}\nPC: {plan['localRoot']}\n\n"
+                                     "One address, one certificate and one firewall rule are added to the helper that already serves this folder. "
+                                     "It restarts briefly; the folder's contents and the other PC's settings are not changed, and that PC reconnects on its own. "
+                                     "The SMB login will be stored root-only on this PC. PC administrator confirmation follows.")
+        accepted = dialog.run() == Gtk.ResponseType.OK
+        dialog.destroy()
+        if accepted:
+            self.installing = True
+            self.work(lambda: backend.join(self.session, self.inventory, plan, helper,
+                      lambda message: GLib.idle_add(self.progress, message)), self.installed, "Adding this PC…")
 
     def progress(self, message):
         if not self.closed:

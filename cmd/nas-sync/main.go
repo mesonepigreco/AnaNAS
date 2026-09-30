@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"time"
 
@@ -188,12 +189,18 @@ func runApplication(ctx context.Context, cfg *config.Config, once, identity bool
 	var task func() func()
 	if os.Getenv("ANANAS_CPU_GOVERNOR") == "1" {
 		governor, err = cpugovernor.Open()
-		if err != nil {
+		switch {
+		case errors.Is(err, cpugovernor.ErrUnavailable):
+			// Synchronization does not depend on the burst policy, so this system
+			// runs without it rather than not running at all.
+			log.Printf("anaNAS: CPU task governor disabled: %v", err)
+		case err != nil:
 			return fmt.Errorf("start CPU task governor: %w", err)
+		default:
+			defer governor.Close()
+			task = governor.Begin
+			observer.SetTaskHook(task)
 		}
-		defer governor.Close()
-		task = governor.Begin
-		observer.SetTaskHook(task)
 	}
 	if once {
 		if err := observer.ScanOnce(ctx); err != nil {

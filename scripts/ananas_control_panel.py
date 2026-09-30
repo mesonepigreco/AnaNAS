@@ -71,8 +71,9 @@ class Panel(Gtk.Application):
         app_id = "org.ananas.ControlPanel"
         if getattr(client, "port", 8721) != 8721:
             app_id += ".p" + hashlib.sha256(str(root).encode()).hexdigest()[:16]
+        # DEFAULT_FLAGS was named FLAGS_NONE before GLib 2.74; both mean no flags.
         super().__init__(application_id=app_id,
-                         flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+                         flags=getattr(Gio.ApplicationFlags, "DEFAULT_FLAGS", Gio.ApplicationFlags.FLAGS_NONE))
         self.client, self.root = client, root
         self.window = None
         self.state = None
