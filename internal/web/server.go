@@ -59,7 +59,7 @@ func NewWithDetails(port int, snapshot Snapshot, pause PauseControl, details Det
 	return NewWithPending(port, snapshot, pause, details, nil, nil)
 }
 
-func NewWithPending(port int, snapshot Snapshot, pause PauseControl, details Details, pending Details, confirm ConfirmControl) (*Server, error) {
+func NewWithPending(port int, snapshot Snapshot, pause PauseControl, details Details, pending Details, confirm ConfirmControl, trees ...TreeControls) (*Server, error) {
 	if port < 0 || port > 65535 {
 		return nil, fmt.Errorf("web port out of range")
 	}
@@ -80,6 +80,10 @@ func NewWithPending(port int, snapshot Snapshot, pause PauseControl, details Det
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", indexHandler(token, pause != nil))
 	mux.HandleFunc("/api/status", statusHandler(snapshot))
+	if len(trees) > 0 && trees[0].Snapshot != nil && trees[0].Prioritize != nil {
+		mux.HandleFunc("/api/nas-tree", treeHandler(token, trees[0]))
+		mux.HandleFunc("/api/prioritize-directory", priorityHandler(token, trees[0]))
+	}
 	if pending != nil && confirm != nil {
 		mux.HandleFunc("/api/pending", pendingHandler(token, pending))
 		mux.HandleFunc("/api/confirm-sync", confirmHandler(token, confirm))

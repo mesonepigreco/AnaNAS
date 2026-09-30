@@ -43,6 +43,7 @@ type WorkerOptions struct {
 
 type WorkerStatus struct {
 	Phase                string `json:"phase"`
+	ActivePath           string `json:"activePath,omitempty"`
 	LastError            string `json:"lastError,omitempty"`
 	CompletedUploads     uint64 `json:"completedUploads"`
 	AppliedRemoteBatches uint64 `json:"appliedRemoteBatches"`
@@ -54,20 +55,21 @@ type WorkerStatus struct {
 // validated egress, retention and remote notification delivery. Deployed observation does
 // not instantiate it. Conflicts retain their durable work and stop the pass.
 type Worker struct {
-	db                *index.DB
-	root              *content.Root
-	c                 *journal.Coordinator
-	store             *stage.Store
-	remote            WorkerRemote
-	opts              WorkerOptions
-	pusher            *Pusher
-	puller            *Puller
-	wake, changes     chan struct{}
-	running           atomic.Bool
-	priorityRequested atomic.Bool
-	mu                sync.Mutex
-	status            WorkerStatus
-	cancel            context.CancelFunc
+	db                 *index.DB
+	root               *content.Root
+	c                  *journal.Coordinator
+	store              *stage.Store
+	remote             WorkerRemote
+	opts               WorkerOptions
+	pusher             *Pusher
+	puller             *Puller
+	wake, changes      chan struct{}
+	running            atomic.Bool
+	priorityRequested  atomic.Bool
+	directoryRequested atomic.Bool
+	mu                 sync.Mutex
+	status             WorkerStatus
+	cancel             context.CancelFunc
 }
 
 func NewWorker(db *index.DB, root *content.Root, c *journal.Coordinator, store *stage.Store, publisher journal.Publisher, remote WorkerRemote, o WorkerOptions) (*Worker, error) {
@@ -85,11 +87,12 @@ func NewWorker(db *index.DB, root *content.Root, c *journal.Coordinator, store *
 	w := &Worker{db: db, root: root, c: c, store: store, remote: remote, opts: o, wake: make(chan struct{}, 1), changes: make(chan struct{}, 1), status: WorkerStatus{Phase: "waiting"}}
 	push := o.PushOptions
 	push.Gate = w.check
+	push.Active = func(path string) { w.update(func(s *WorkerStatus) { s.ActivePath = path }) }
 	w.pusher, err = NewPusher(db, store, remote, push)
 	if err != nil {
 		return nil, err
 	}
-	w.puller, err = NewPuller(c, store, publisher, remote, PullOptions{Namespace: o.Namespace, Writes: o.Writes, Exclusions: o.Exclusions, MaxFileBytes: o.MaxFileBytes, MaxBatchBytes: o.MaxBatchBytes, ReadBytesPerSecond: o.ReadBytesPerSecond, Gate: w.check})
+	w.puller, err = NewPuller(c, store, publisher, remote, PullOptions{Namespace: o.Namespace, Writes: o.Writes, Exclusions: o.Exclusions, MaxFileBytes: o.MaxFileBytes, MaxBatchBytes: o.MaxBatchBytes, ReadBytesPerSecond: o.ReadBytesPerSecond, Gate: w.check, Active: func(path string) { w.update(func(s *WorkerStatus) { s.ActivePath = path }) }})
 	if err != nil {
 		return nil, err
 	}
@@ -110,6 +113,8 @@ func (w *Worker) RequestSync() {
 	w.priorityRequested.Store(true)
 	w.Notify()
 }
+
+func (w *Worker) RequestDirectory() { w.directoryRequested.Store(true); w.Notify() }
 
 // Interrupt cancels active I/O and schedules a fresh policy check. Call after
 // durable pause/resume changes or a route/availability change. Cancellation is
@@ -204,7 +209,12 @@ func (w *Worker) Run(ctx context.Context) error {
 			endTask = w.opts.Task()
 		}
 		w.update(func(s *WorkerStatus) { s.Phase = "working"; s.LastError = "" })
-		pass := workerPass{fetch: true}
+		priority, priorityErr := w.db.PriorityDirectory()
+		if priorityErr != nil {
+			cancel()
+			return priorityErr
+		}
+		pass := workerPass{fetch: true, priorityScan: priority != ""}
 		err := w.db.ClearTransientIssues(workCtx)
 		for more := true; more; {
 			if err != nil {
@@ -315,6 +325,7 @@ func (w *Worker) finishOutbox(ctx context.Context) error {
 }
 
 type workerPass struct {
+	priorityScan  bool
 	retry         error
 	requestCursor string
 	requestsDone  bool
@@ -370,6 +381,31 @@ func (w *Worker) turn(ctx context.Context, pass *workerPass) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if w.directoryRequested.Swap(false) {
+		pass.priorityScan = true
+	}
+	if pass.priorityScan && state.Received-state.Completed <= index.MaxRemoteBacklog-journal.MaxPage {
+		if err := w.check(ctx); err != nil {
+			return false, err
+		}
+		page, err := w.remote.ChangesPage(ctx, state.Namespace, state.Policy, state.Received, journal.MaxPage)
+		if err != nil {
+			return false, err
+		}
+		if page.Namespace != w.opts.Namespace {
+			return false, journal.ErrIdentity
+		}
+		if err := w.db.PrefetchRemotePage(page); err != nil {
+			if errors.Is(err, index.ErrRemoteBacklogFull) {
+				pass.priorityScan = false
+				return true, nil
+			}
+			return false, err
+		}
+		pass.priorityScan = len(page.Batches) == journal.MaxPage
+		return true, nil
+	}
+	pass.priorityScan = false
 	if state.Acknowledged < state.Completed {
 		if err := w.acknowledge(ctx, state); err != nil {
 			return false, err
@@ -402,6 +438,9 @@ func (w *Worker) turn(ctx context.Context, pass *workerPass) (bool, error) {
 		pass.fetch = len(page.Batches) == journal.MaxPage
 	}
 	for i := 0; i < journal.MaxPage; i++ {
+		if w.directoryRequested.Load() {
+			return true, nil
+		}
 		batch, err := w.db.NextRemoteBatch()
 		if err != nil {
 			return false, err
@@ -509,6 +548,7 @@ func (w *Worker) applyRemote(ctx context.Context, batch *changefeed.Batch) error
 	if err := FinishDownload(ctx, w.db, w.c, w.store, w.opts.Namespace, w.operationOptions()); err != nil {
 		return err
 	}
+	w.verifyDownloaded(ctx, batch)
 	w.update(func(s *WorkerStatus) { s.AppliedRemoteBatches++ })
 	return nil
 }

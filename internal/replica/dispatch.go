@@ -21,6 +21,7 @@ type UploadRemote interface {
 }
 
 type PushOptions struct {
+	Active                                          func(string)
 	Writes                                          bool
 	Exclusions                                      []string
 	MaxFileBytes, MaxBatchBytes, ReadBytesPerSecond int64
@@ -99,6 +100,9 @@ func committedUpload(u *index.Upload) *journal.Record {
 // re-uploading, and stores only an exact committed receipt. It does not clear
 // local bases, build an outbox, retry internally or run an automatic loop.
 func (p *Pusher) Dispatch(ctx context.Context) (*journal.Record, error) {
+	if p.opts.Active != nil {
+		defer p.opts.Active("")
+	}
 	if !p.opts.Writes {
 		return nil, fmt.Errorf("upload dispatch disabled")
 	}
@@ -196,6 +200,9 @@ func (p *Pusher) Dispatch(ctx context.Context) (*journal.Record, error) {
 			return nil, fmt.Errorf("upload spool for %q: %w", e.Path, err)
 		}
 		streams[i] = stream
+		if p.opts.Active != nil {
+			streams[i] = &activeUploadReader{Reader: stream, path: e.Path, active: p.opts.Active}
+		}
 		opened = append(opened, stream)
 	}
 	current, err := p.db.PendingUpload()
@@ -219,4 +226,20 @@ func (p *Pusher) Dispatch(ctx context.Context) (*journal.Record, error) {
 		return nil, err
 	}
 	return &record, nil
+}
+
+// Mark the path when its bytes are read, not when all batch spools are opened.
+type activeUploadReader struct {
+	io.Reader
+	path    string
+	active  func(string)
+	started bool
+}
+
+func (r *activeUploadReader) Read(p []byte) (int, error) {
+	if !r.started {
+		r.started = true
+		r.active(r.path)
+	}
+	return r.Reader.Read(p)
 }

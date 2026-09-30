@@ -58,7 +58,7 @@ def install_files():
             target.mkdir(parents=True, exist_ok=True)
             for name in ("helper", "launcher"):
                 shutil.copy2(stage / arch / name, target / name)
-    for name in ("ananas_setup.py", "ananas_setup_gui.py", "ananas_setup_system.py", "ananas_control_panel.py"):
+    for name in ("ananas_setup.py", "ananas_setup_gui.py", "ananas_setup_system.py", "ananas_control_panel.py", "ananas_nas_tree.py"):
         shutil.copy2(repo / "scripts" / name, bin_dir / name)
     shutil.copy2(repo / "scripts/ananas_setup_system.py", destination / "ananas_setup_system.py")
     shutil.copy2(repo / "scripts/nas_sync_indicator.py", bin_dir / "nas-sync-indicator")

@@ -246,12 +246,17 @@ func runApplication(ctx context.Context, cfg *config.Config, once, identity bool
 		// Follow the NAS if the locator found it at another address.
 		storage.nas = live.nas
 	}
+	treeCtx, stopTree := context.WithCancel(ctx)
+	treeView := &nasTreeView{ctx: treeCtx, db: db, live: live, namespace: cfg.Sync.Namespace}
+	defer func() { stopTree(); treeView.wg.Wait() }()
 	statusServer, err := web.NewWithPending(cfg.WebPort, func() any {
 		status := observer.Status()
 		reason := "NAS transfers disabled: synchronization engine and safety validation are incomplete."
 		var uploaded, downloaded uint64
+		activePath := ""
 		activity, activityErr := db.Activity(time.Now())
 		if live != nil {
+			activePath = live.worker.Status().ActivePath
 			status.Mode = "native LAN synchronization — live trial"
 			reason = live.reason(status)
 			traffic := live.client.Traffic()
@@ -269,11 +274,12 @@ func runApplication(ctx context.Context, cfg *config.Config, once, identity bool
 			DownloadBytes   uint64               `json:"downloadBytes"`
 			Updated24Hours  uint64               `json:"updatedLast24Hours"`
 			RecentUpdates   []index.RecentUpdate `json:"recentUpdates"`
+			ActivePath      string               `json:"activePath,omitempty"`
 			CPULimitPercent int64                `json:"cpuLimitPercent,omitempty"`
 			NAS             config.NAS           `json:"nas"`
 			Limits          config.Limits        `json:"limits"`
 			Traffic         traffic.Summary      `json:"traffic"`
-		}{Status: status, Paused: controls.Paused(), AutomaticWrites: live != nil, SyncReason: reason, UploadBytes: uploaded, DownloadBytes: downloaded, Updated24Hours: activity.UpdatedLast24Hours, RecentUpdates: activity.Recent, CPULimitPercent: cpuPercent(governor), NAS: cfg.NAS, Limits: cfg.Limits, Traffic: trafficHistory.Summary(time.Now())}
+		}{Status: status, Paused: controls.Paused(), AutomaticWrites: live != nil, SyncReason: reason, UploadBytes: uploaded, DownloadBytes: downloaded, Updated24Hours: activity.UpdatedLast24Hours, RecentUpdates: activity.Recent, ActivePath: activePath, CPULimitPercent: cpuPercent(governor), NAS: cfg.NAS, Limits: cfg.Limits, Traffic: trafficHistory.Summary(time.Now())}
 	}, controls.SetPaused, storage.snapshot, func(ctx context.Context, after string) (any, error) {
 		return db.PendingSync(ctx, after, cfg.Sync.MaxFileBytes)
 	}, func(ctx context.Context, request index.SyncConfirmation) (index.ConfirmationResult, error) {
@@ -285,7 +291,7 @@ func runApplication(ctx context.Context, cfg *config.Config, once, identity bool
 			live.worker.RequestSync()
 		}
 		return result, err
-	})
+	}, treeView.controls())
 	if err != nil {
 		return fmt.Errorf("start local status UI: %w", err)
 	}

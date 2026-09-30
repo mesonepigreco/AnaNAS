@@ -211,8 +211,12 @@ class Panel(Gtk.Application):
         foot.set_line_wrap(True)
         folders.pack_start(foot, False, False, 0)
 
+        from ananas_nas_tree import NASTree
+        self.nas_tree = NASTree(self)
+        notebook.append_page(self.nas_tree, Gtk.Label(label="NAS files"))
+
         self.pending_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=14)
-        notebook.append_page(self.pending_page, Gtk.Label(label="Pending files"))
+        notebook.append_page(self.pending_page, Gtk.Label(label="Local changes"))
         self.pending_summary = self.label("Refresh to load pending files", "section")
         self.pending_page.pack_start(self.pending_summary, False, False, 0)
         pending_note = self.label("Double-click to open the containing folder · Right-click for folder and terminal actions\nAutomatic sync stays enabled. Confirm gives files priority after the current transfer. Pause settings and conflicts still apply.", "muted")
@@ -337,6 +341,8 @@ class Panel(Gtk.Application):
             state, error = self.pending
             self.pending_scheduled = False
         self.render(state, error)
+        if hasattr(self, "nas_tree"):
+            self.nas_tree.update_activity((state or {}).get("activePath", "") if not error else "")
         self.schedule_pending_refresh()
         return False
 

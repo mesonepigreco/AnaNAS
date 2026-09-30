@@ -318,3 +318,45 @@ func TestClientScopedRecovery(t *testing.T) {
 		t.Fatal(record, err)
 	}
 }
+
+func TestInventoryReaderWaitsForCurrentFileWithoutInterruptingIt(t *testing.T) {
+	f := setup(t, true, nil)
+	content := newTestClient(t, clientOptions(f))
+	reader, err := content.NewInventoryReader()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	if reader.opts.Writes {
+		t.Fatal("inventory client permits writes")
+	}
+	ctx, finish, err := content.begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if finish != nil {
+			finish()
+		}
+	}()
+	done := make(chan error, 1)
+	go func() { _, err := reader.ChangesPage(context.Background(), "", "", 0, journal.MaxPage); done <- err }()
+	select {
+	case err := <-done:
+		t.Fatal("inventory passed active file", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	if ctx.Err() != nil {
+		t.Fatal("file interrupted", ctx.Err())
+	}
+	finish()
+	finish = nil
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("inventory did not start after file")
+	}
+}

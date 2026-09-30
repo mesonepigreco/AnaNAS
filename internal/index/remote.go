@@ -26,6 +26,7 @@ type RemoteState struct {
 	Acknowledged    uint64 `json:"acknowledged"`
 	ExcludedEntries uint64 `json:"excludedEntries"`
 	LastPage        string `json:"lastPage"`
+	BufferedBytes   int64  `json:"bufferedBytes,omitempty"`
 }
 
 func remoteKey(sequence uint64) []byte {
@@ -46,7 +47,7 @@ func readRemoteState(tx *bolt.Tx) (RemoteState, error) {
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return s, err
 	}
-	if !manifest.ValidID(s.Namespace) || !manifest.ValidID(s.Policy) || !manifest.ValidID(s.LastPage) || s.Acknowledged > s.Completed || s.Completed > s.Received || s.Received-s.Completed > journal.MaxPage {
+	if !manifest.ValidID(s.Namespace) || !manifest.ValidID(s.Policy) || !manifest.ValidID(s.LastPage) || s.Acknowledged > s.Completed || s.Completed > s.Received || s.Received-s.Completed > MaxRemoteBacklog || s.BufferedBytes < 0 || s.BufferedBytes > MaxRemoteMetadataBytes {
 		return s, fmt.Errorf("invalid persistent remote state")
 	}
 	return s, nil
@@ -63,6 +64,16 @@ func (d *DB) RemoteState() (RemoteState, error) {
 // or policy change fails closed; reconciliation must not reuse the old cursor.
 // This method neither acknowledges the server nor clears local dirty work.
 func (d *DB) ReceiveRemotePage(page changefeed.Page) error {
+	return d.receiveRemotePage(page, false)
+}
+
+// PrefetchRemotePage retains bounded metadata for directory scheduling without
+// acknowledging or downloading any content.
+func (d *DB) PrefetchRemotePage(page changefeed.Page) error {
+	return d.receiveRemotePage(page, true)
+}
+
+func (d *DB) receiveRemotePage(page changefeed.Page, prefetch bool) error {
 	if err := page.Validate(page.After, journal.MaxPage); err != nil {
 		return err
 	}
@@ -86,14 +97,14 @@ func (d *DB) ReceiveRemotePage(page changefeed.Page) error {
 		if s.LastPage == identity && s.Received == page.Through {
 			return nil
 		}
-		if s.Received != page.After || s.Completed != s.Received {
+		if s.Received != page.After || (!prefetch && s.Completed != s.Received) || page.Through-s.Completed > MaxRemoteBacklog {
 			return ErrStale
 		}
 		b, err := tx.CreateBucketIfNotExists(remoteInbox)
 		if err != nil {
 			return err
 		}
-		if key, _ := b.Cursor().First(); key != nil {
+		if key, _ := b.Cursor().First(); key != nil && !prefetch {
 			return fmt.Errorf("inbox differs from completed cursor")
 		}
 		for _, batch := range page.Batches {
@@ -101,6 +112,10 @@ func (d *DB) ReceiveRemotePage(page changefeed.Page) error {
 			if err != nil {
 				return err
 			}
+			if s.BufferedBytes+int64(len(data)) > MaxRemoteMetadataBytes {
+				return ErrRemoteBacklogFull
+			}
+			s.BufferedBytes += int64(len(data))
 			if err := b.Put(remoteKey(batch.Sequence), data); err != nil {
 				return err
 			}
@@ -122,7 +137,11 @@ func nextRemote(tx *bolt.Tx, s RemoteState) (*changefeed.Batch, error) {
 	if b == nil {
 		return nil, fmt.Errorf("missing remote inbox")
 	}
-	raw := b.Get(remoteKey(s.Completed + 1))
+	sequence := s.Completed + 1
+	if active := tx.Bucket(meta).Get(remoteActiveKey); len(active) == 8 {
+		sequence = binary.BigEndian.Uint64(active)
+	}
+	raw := b.Get(remoteKey(sequence))
 	if len(raw) == 0 || len(raw) > journal.MaxRecordBytes {
 		return nil, fmt.Errorf("missing or oversized remote batch")
 	}
@@ -130,19 +149,22 @@ func nextRemote(tx *bolt.Tx, s RemoteState) (*changefeed.Batch, error) {
 	if err := json.Unmarshal(raw, &batch); err != nil {
 		return nil, err
 	}
-	page := changefeed.Page{Namespace: s.Namespace, Policy: s.Policy, After: s.Completed, Through: s.Completed + 1, Batches: []changefeed.Batch{batch}}
-	if err := page.Validate(s.Completed, 1); err != nil {
+	page := changefeed.Page{Namespace: s.Namespace, Policy: s.Policy, After: sequence - 1, Through: sequence, Batches: []changefeed.Batch{batch}}
+	if err := page.Validate(sequence-1, 1); err != nil {
 		return nil, err
 	}
 	return &batch, nil
 }
 
-// NextRemoteBatch returns only the oldest pending batch, detached from bbolt.
+// NextRemoteBatch pins the next dependency-safe batch, detached from bbolt.
 func (d *DB) NextRemoteBatch() (*changefeed.Batch, error) {
 	var batch *changefeed.Batch
-	err := d.db.View(func(tx *bolt.Tx) error {
+	err := d.db.Update(func(tx *bolt.Tx) error {
 		s, err := readRemoteState(tx)
 		if err != nil {
+			return err
+		}
+		if err := selectRemote(tx, s); err != nil {
 			return err
 		}
 		batch, err = nextRemote(tx, s)
@@ -194,7 +216,26 @@ func completeRemote(tx *bolt.Tx, s RemoteState, batch *changefeed.Batch) error {
 		return fmt.Errorf("excluded entry counter exhausted")
 	}
 	s.ExcludedEntries += uint64(batch.Excluded)
-	s.Completed = batch.Sequence
+	done, err := tx.CreateBucketIfNotExists(remoteDone)
+	if err != nil {
+		return err
+	}
+	if err := done.Put(remoteKey(batch.Sequence), []byte{1}); err != nil {
+		return err
+	}
+	s.BufferedBytes = max(0, s.BufferedBytes-int64(len(tx.Bucket(remoteInbox).Get(remoteKey(batch.Sequence)))))
+	if err := tx.Bucket(remoteInbox).Delete(remoteKey(batch.Sequence)); err != nil {
+		return err
+	}
+	if err := tx.Bucket(meta).Delete(remoteActiveKey); err != nil {
+		return err
+	}
+	for s.Completed < s.Received && done.Get(remoteKey(s.Completed+1)) != nil {
+		s.Completed++
+		if err := done.Delete(remoteKey(s.Completed)); err != nil {
+			return err
+		}
+	}
 	data, err := json.Marshal(s)
 	if err != nil {
 		return err

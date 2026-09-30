@@ -23,6 +23,7 @@ type Downloader interface {
 }
 
 type PullOptions struct {
+	Active                                          func(string)
 	Namespace                                       string
 	Writes                                          bool
 	Exclusions                                      []string
@@ -93,6 +94,9 @@ func (p gatedPublisher) Publish(ctx context.Context, r journal.Record) error {
 // pins partial ownership for retry. It never fetches a page, polls, or retries by itself.
 func (p *Puller) Pull(ctx context.Context, proposal journal.Proposal) (PullResult, error) {
 	var result PullResult
+	if p.opts.Active != nil {
+		defer p.opts.Active("")
+	}
 	if !p.opts.Writes {
 		return result, fmt.Errorf("replica writes disabled")
 	}
@@ -190,6 +194,9 @@ func (p *Puller) Pull(ctx context.Context, proposal journal.Proposal) (PullResul
 				if err := p.store.DiscardPartial(e.Next.ID); err != nil {
 					return err
 				}
+			}
+			if p.opts.Active != nil {
+				p.opts.Active(e.Path)
 			}
 			result.Transfers[i], err = p.stage(ctx, e, bases[i])
 			if err != nil {

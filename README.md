@@ -199,3 +199,27 @@ there is not yet a renewal UI. Do not treat this as a backup replacement.
 
 See [requirements](PROJECT.md), [progress](PLAN.md), [acceptance scope](docs/live-trial.md),
 [resource measurements](docs/performance.md) and [publication/privacy notes](docs/publication-audit.md).
+
+### Online NAS tree
+
+In the Control panel, **NAS files** shows the inventory read from the NAS helper,
+including files that have not arrived on this computer. Expand folders to browse;
+large folders offer **Load more…**. Each folder shows its recursive file count and
+a red-to-green progress bar. A file counts as local only when its observed local
+copy is clean and its confirmed version matches the NAS inventory. Same-size
+edits remain pending. Empty directories contain zero files.
+
+The active file and its ancestor folders appear in bold with smoothly rotating
+two-arrow sync icons. Right-click a folder and choose **Prioritize syncing this
+directory**. The current transfer completes first (atomic multi-file operations
+also finish together), then dependency-safe downloads in that folder run before
+unrelated queued work. Priority and partially completed queue ordering survive
+restarts. Parent operations, exclusions, conflicts and pause settings still apply.
+**Clear folder priority** restores normal order. The former pending list remains
+available as **Local changes** for outgoing changes and their blockers.
+
+Inventory refreshes use the existing authenticated NAS protocol and do not
+acknowledge or download file content. The tree reflects versions already indexed
+by the NAS helper, with a loading or stale-inventory message while refreshing or
+offline. Directory downloads use bounded lookahead of up to 100,000 operations
+or 64 MiB of metadata; more distant work becomes eligible as that window drains.

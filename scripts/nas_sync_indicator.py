@@ -162,6 +162,12 @@ class Client:
     def pending_files(self, after=""):
         return self.pending_request("GET", "/api/pending?" + urllib.parse.urlencode({"after": after}))
 
+    def nas_tree(self, path='', after=''):
+        return self.pending_request('GET', '/api/nas-tree?' + urllib.parse.urlencode({'path': path, 'after': after}))
+
+    def prioritize_directory(self, path):
+        return self.pending_request('POST', '/api/prioritize-directory', {'path': path})
+
     def confirm_sync(self, path=None, generation=None, all_files=False):
         value = {"all": True} if all_files else {"path": path, "generation": generation}
         return self.pending_request("POST", "/api/confirm-sync", value)

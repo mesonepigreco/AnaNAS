@@ -27,6 +27,7 @@ import (
 type syncRuntime struct {
 	worker    *replica.Worker
 	client    *transferapi.Client
+	inventory *transferapi.Client
 	journal   *journal.Coordinator
 	store     *stage.Store
 	root      *content.Root
@@ -148,11 +149,18 @@ func openSync(cfg *config.Config, state string, db *index.DB, observer *observe.
 		return nil, err
 	}
 	s.network = daemon.NetworkOptions{Monitor: netwatch.Monitor{Interface: cfg.NAS.Interface}, Check: gate}
+	s.inventory, err = s.client.NewInventoryReader()
+	if err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
 func (s *syncRuntime) Close() error {
 	var err error
+	if s.inventory != nil {
+		err = errors.Join(err, s.inventory.Close())
+	}
 	if s.client != nil {
 		err = errors.Join(err, s.client.Close())
 	}

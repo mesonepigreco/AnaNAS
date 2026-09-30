@@ -106,8 +106,22 @@ type Client struct {
 	sent, received   atomic.Uint64
 	changes          chan struct{}
 	operationTimeout time.Duration
+	operationSlot    chan struct{}
 	source           func() (netip.Addr, error)
 	tls              *tls.Config
+}
+
+// NewInventoryReader uses an independent read-only transport and cancellation scope.
+// It shares a serialization slot so inventory waits for the current file.
+// Its owner must monitor network changes and close it after joining its reads.
+func (c *Client) NewInventoryReader() (*Client, error) {
+	options := c.opts
+	options.Writes = false
+	reader, err := NewClient(options)
+	if err == nil {
+		reader.operationSlot = c.operationSlot
+	}
+	return reader, err
 }
 
 // NewClient permits only an IPv4 private literal (or explicit loopback tests),
@@ -156,7 +170,7 @@ func NewClient(o ClientOptions) (*Client, error) {
 	// same finite context so one active request remains interruptible.
 	seconds := (o.MaxBatchBytes + (2 << 20) - 1) / (2 << 20)
 	operationTimeout := 45*time.Second + time.Duration(seconds*8)*time.Second
-	c := &Client{opts: o, exclusions: m, baseURL: "https://" + o.Endpoint.String(), changes: make(chan struct{}, 1), operationTimeout: operationTimeout}
+	c := &Client{opts: o, exclusions: m, baseURL: "https://" + o.Endpoint.String(), changes: make(chan struct{}, 1), operationTimeout: operationTimeout, operationSlot: make(chan struct{}, 1)}
 	c.source = func() (netip.Addr, error) {
 		source := o.Source
 		if o.SourceFunc != nil {
@@ -346,7 +360,16 @@ func (c *Client) begin(ctx context.Context) (context.Context, func(), error) {
 	c.active = true
 	c.cancel = cancel
 	c.mu.Unlock()
-	finish := func() { cancel(); c.mu.Lock(); c.active = false; c.cancel = nil; c.mu.Unlock() }
+	release := func() { cancel(); c.mu.Lock(); c.active = false; c.cancel = nil; c.mu.Unlock() }
+	// The NAS helper permits one content/metadata operation at a time. Queue
+	// inventory behind the current file instead of causing busy errors or retries.
+	select {
+	case c.operationSlot <- struct{}{}:
+	case <-ctx.Done():
+		release()
+		return nil, nil, ctx.Err()
+	}
+	finish := func() { <-c.operationSlot; release() }
 	if err := c.opts.Gate(ctx); err != nil {
 		finish()
 		return nil, nil, err
