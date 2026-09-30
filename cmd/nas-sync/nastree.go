@@ -18,10 +18,34 @@ type nasTreeView struct {
 	live      *syncRuntime
 	namespace string
 	mu        sync.Mutex
+	verifying bool
+	verified  time.Time
 	loading   bool
 	checked   time.Time
 	problem   string
 	wg        sync.WaitGroup
+}
+
+// Local verification must not wait behind a long network download or an
+// inventory request. Only one bounded verification pass can run at a time.
+func (v *nasTreeView) refreshProgress() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.live == nil || v.verifying || time.Since(v.verified) < 15*time.Second {
+		return
+	}
+	v.verifying = true
+	v.wg.Add(1)
+	go func() {
+		defer v.wg.Done()
+		ctx, cancel := context.WithTimeout(v.ctx, 5*time.Minute)
+		defer cancel()
+		_ = v.live.worker.VerifyLocalProgress(ctx)
+		v.mu.Lock()
+		v.verifying = false
+		v.verified = time.Now()
+		v.mu.Unlock()
+	}()
 }
 
 func (v *nasTreeView) refresh() {
@@ -82,6 +106,7 @@ func (v *nasTreeView) refresh() {
 func (v *nasTreeView) controls() web.TreeControls {
 	return web.TreeControls{
 		Snapshot: func(ctx context.Context, path, after string) (any, error) {
+			v.refreshProgress()
 			v.refresh()
 			tree, err := v.db.NASTree(ctx, path, after)
 			if err != nil {
