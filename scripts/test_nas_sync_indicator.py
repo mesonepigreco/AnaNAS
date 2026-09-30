@@ -7,6 +7,23 @@ from gi.repository import Gio, GLib
 
 
 class IndicatorTests(unittest.TestCase):
+    def test_default_launcher_uses_existing_wizard_profile(self):
+        import json
+        import tempfile
+        from nas_sync_indicator import main
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / 'nas-sync'
+            profile = base / 'profiles/example/config.json'
+            profile.parent.mkdir(parents=True)
+            profile.write_text(json.dumps({'local': {'root': '/tmp/existing-sync'}, 'webPort': 8723}))
+            with patch.dict('os.environ', {'XDG_CONFIG_HOME': directory}), \
+                    patch('sys.argv', ['nas-sync-indicator', '--config', str(base / 'config.json')]), \
+                    patch('nas_sync_indicator.Indicator') as indicator:
+                main()
+                self.assertEqual(indicator.call_args.args[1], Path('/tmp/existing-sync'))
+                self.assertNotIn('configured', indicator.call_args.kwargs)
+                indicator.return_value.run.assert_called_once()
+
     def test_icon_is_found_where_the_installer_puts_it(self):
         import tempfile
         with tempfile.TemporaryDirectory() as data, patch.dict('os.environ', {'XDG_DATA_HOME': data}):

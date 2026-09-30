@@ -702,7 +702,8 @@ def main():
     parser.add_argument("--setup", action="store_true")
     parser.add_argument("--port", type=int)
     parser.add_argument("--root", type=Path)
-    parser.add_argument("--config", type=Path, default=Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "nas-sync/config.json")
+    default_config = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "nas-sync/config.json"
+    parser.add_argument("--config", type=Path, default=default_config)
     args = parser.parse_args()
     if args.setup:
         from ananas_setup_gui import run
@@ -712,6 +713,12 @@ def main():
         from ananas_control_panel import run
         run(Client(args.port), args.root)
         return
+    if args.config == default_config and not args.config.exists():
+        # Wizard installations use per-folder profiles. The desktop launcher
+        # and older indicator services still pass the conventional primary path.
+        candidates = sorted((default_config.parent / "profiles").glob("*/config.json"))
+        if candidates:
+            args.config = candidates[0]
     if not args.config.exists():
         if args.control_panel:
             from ananas_setup_gui import run
