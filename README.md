@@ -13,6 +13,38 @@ a new or empty local destination. Keep existing backups while evaluating anaNAS.
 Your share, folder names, network interface and mount location can be different
 from every example in this repository.
 
+### Prerequisites on Ubuntu
+
+Install the system packages (Ubuntu 20.04 and later):
+
+```sh
+sudo apt-get update
+sudo apt-get install python3-gi gir1.2-gtk-3.0 openssh-client smbclient \
+    cifs-utils nftables policykit-1 openssl iproute2
+```
+
+The installer runs `/usr/bin/python3`, so GTK must be available to the system
+Python, not only to a Conda or virtual environment.
+
+anaNAS needs Go 1.27 or newer, and Ubuntu's `golang-go` package is older. Install
+the official release from [go.dev/dl](https://go.dev/dl/) instead. The commands
+below install it in your home directory, without root (use `arm64` in place of
+`amd64` on ARM PCs). Check the archive against the SHA-256 published on that page:
+
+```sh
+curl -fLO https://go.dev/dl/go1.27.2.linux-amd64.tar.gz
+sha256sum go1.27.2.linux-amd64.tar.gz   # compare with go.dev/dl
+rm -rf ~/.local/go && mkdir -p ~/.local/bin
+tar -C ~/.local -xzf go1.27.2.linux-amd64.tar.gz
+ln -sf ~/.local/go/bin/go ~/.local/bin/go
+go version   # open a new terminal first if ~/.local/bin was just created
+```
+
+Ubuntu adds `~/.local/bin` to `PATH` at login once that folder exists. The Go
+module dependencies download automatically during the build.
+
+### Run the installer
+
 From a source checkout, as your desktop user (not root):
 
 ```sh
