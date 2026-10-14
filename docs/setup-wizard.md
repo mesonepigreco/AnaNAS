@@ -136,7 +136,14 @@ wizard does not invoke them.
   and the PC config has no `sync.source`. Only a helper with
   `lockPeerAddresses` gains this PC's address in `peers`, the firewall and
   `sync.source`. A successful enrollment removes its `.before-enroll` snapshots
-  so a later enrollment cannot restore an outdated helper configuration. If the NAS stops answering at `nas.host`,
+  so a later enrollment cannot restore an outdated helper configuration. Retries
+  preserve the current client allowlist, CA bundle and service configuration;
+  rollback snapshots are refreshed before changes. Existing certificates are
+  never revoked based on a PC's IP address. Setup requires a pinned, mutually
+  authenticated API response before reporting enrollment success.
+  Reinstalling a helper from another PC must preserve its existing trust bundle,
+  client allowlist and namespace; replacing these requires re-enrolling the PCs.
+  If the NAS stops answering at `nas.host`,
   the daemon and the mount helper search the direct subnet for the pinned helper
   certificate; the mount is re-checked by a two-minute timer and remounted if the
   NAS moved. Interface or subnet changes still require configuration maintenance.

@@ -14,6 +14,38 @@ import ananas_setup_system as system
 
 
 class SetupTests(unittest.TestCase):
+    def test_enrollment_requires_pinned_authenticated_state(self):
+        route = {'source': '10.23.42.17'}
+        config = {'nas': {'host': '10.23.42.30'}, 'sync': {
+            'ca': 'ca.pem', 'certificate': 'client.pem', 'privateKey': 'client.key',
+            'port': 18742, 'namespace': 'a' * 64,
+            'serverFingerprint': hashlib.sha256(b'server').hexdigest()}}
+        with patch.object(setup, 'lan', return_value=route), \
+                patch.object(setup.ssl, 'create_default_context') as context, \
+                patch.object(setup.http.client, 'HTTPSConnection') as https:
+            connection = https.return_value
+            connection.sock.getpeercert.return_value = b'server'
+            response = connection.getresponse.return_value
+            response.status, response.read.return_value = 200, b'{"epoch": 1}'
+            setup.verify_enrollment(config, route)
+            context.return_value.load_cert_chain.assert_called_once_with('client.pem', 'client.key')
+            connection.request.assert_called_once_with('GET', '/v1/state', headers={
+                'X-Ananas-Namespace': 'a' * 64, 'Connection': 'close'})
+            connection.close.assert_called_once()
+            for status, body in [(403, b'{}'), (200, b'{}'), (200, b'x' * 1025), (200, b'null')]:
+                response.status, response.read.return_value = status, body
+                with self.subTest(status=status, body=body[:20]), self.assertRaises(setup.SetupError):
+                    setup.verify_enrollment(config, route)
+            connection.request.reset_mock()
+            connection.sock.getpeercert.return_value = b'wrong server'
+            with self.assertRaisesRegex(setup.SetupError, 'certificate changed'):
+                setup.verify_enrollment(config, route)
+            connection.request.assert_not_called()
+            connection.sock.getpeercert.return_value = b'server'
+            connection.getresponse.side_effect = setup.ssl.SSLError('certificate required')
+            with self.assertRaisesRegex(setup.SetupError, 'could not authenticate'):
+                setup.verify_enrollment(config, route)
+
     def test_only_qnap_device_responses_are_accepted(self):
         good = b'<QDocRoot version="1.0"><hostname>My QNAP</hostname><webAccessPort>8080</webAccessPort><doQuick/></QDocRoot>'
         self.assertEqual(setup.qnap_identity(good), 'My QNAP')
@@ -373,7 +405,7 @@ class SetupTests(unittest.TestCase):
             home = Path(temporary)
             with patch.object(Path, 'home', return_value=home), patch.object(setup, 'config_home', return_value=home / '.config/nas-sync'), \
                     patch.object(setup, 'lan', return_value=route), patch.object(setup, 'run', side_effect=local), \
-                    patch.object(setup.time, 'sleep'):
+                    patch.object(setup.time, 'sleep'), patch.object(setup, 'verify_enrollment') as verify:
                 existing = home / 'installed-helper'
                 existing.mkdir()
                 helper = self.helper_fixture(existing, route, base, locked=locked)
@@ -387,6 +419,7 @@ class SetupTests(unittest.TestCase):
                 plan = setup.make_join_plan(session, inventory, share, str(home / 'files'), managed, read)
                 self.assertEqual((plan['port'], plan['namespace'], plan['uid']), (18742, 'c' * 64, os.getuid()))
                 result = setup.join(session, inventory, plan, read, lambda message: None)
+                verify.assert_called_once()
                 check(home=home, plan=plan, result=result, helper=helper, payloads=payloads, calls=calls,
                       privileged=privileged, session=session, base=base, original_run=original_run)
 
@@ -550,19 +583,34 @@ class SetupTests(unittest.TestCase):
         return dict(session=session, payloads=payloads, calls=calls, helper=helper, managed=managed,
                     inventory=inventory, base=base, share=inventory['shares'][0], state=state)
 
-    def run_join(self, home, environment, folder='files'):
+    def run_join(self, home, environment, folder='files', verification_error=None, client_id='b' * 64):
         original_run = setup.run
         def local(argv, **kwargs):
             if argv[0] == 'openssl':
                 return original_run(argv, **kwargs)
             if '-client-identity' in argv:
-                return json.dumps(dict(clientID='b' * 64)).encode()
+                return json.dumps(dict(clientID=client_id)).encode()
             return b''
-        with patch.object(setup, 'run', side_effect=local):
+        with patch.object(setup, 'run', side_effect=local), patch.object(setup, 'verify_enrollment', side_effect=verification_error):
             read = setup.read_helper(environment['session'], environment['managed'])
             plan = setup.make_join_plan(environment['session'], environment['inventory'],
                                         environment['share'], str(home / folder), environment['managed'], read)
             return plan, setup.join(environment['session'], environment['inventory'], plan, read, lambda message: None)
+
+    def test_running_helper_that_rejects_enrollment_is_rolled_back(self):
+        route = dict(host='10.23.42.30', source='10.23.42.17', interface='enp1s0', prefix='10.23.42.0/24')
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            with patch.object(Path, 'home', return_value=home), patch.object(setup, 'config_home', return_value=home / '.config/nas-sync'), \
+                    patch.object(setup, 'lan', return_value=route), patch.object(setup.time, 'sleep'):
+                environment = self.join_environment(home, route)
+                original = dict(environment['payloads'])
+                with self.assertRaisesRegex(setup.SetupError, 'previous configuration was restored'):
+                    self.run_join(home, environment, verification_error=setup.SetupError('certificate required'))
+                for name in ('helper.json', 'ca.pem', 'service.sh'):
+                    path = environment['base'] + '/' + name
+                    self.assertEqual(environment['payloads'][path], original[path])
+                self.assertFalse((home / '.config/systemd/user').exists())
 
     def test_join_proceeds_when_the_helper_cannot_verify_a_configuration_in_advance(self):
         """Helpers predating -check-config still enrol; the restart proves the result."""
@@ -621,7 +669,7 @@ class SetupTests(unittest.TestCase):
                 setup.atomically(profile / 'setup.json', json.dumps({'phase': 'staging', 'plan': {}}).encode())
                 self.assertTrue(setup.staged_attempt(profile))
 
-    def test_an_interrupted_attempt_is_repaired_from_the_saved_originals(self):
+    def test_retry_preserves_enrollments_newer_than_saved_originals(self):
         """An attempt that wrote helper.json and then failed must be cleanly redoable."""
         route = dict(host='10.23.42.30', source='10.23.42.17', interface='enp1s0', prefix='10.23.42.0/24')
         with tempfile.TemporaryDirectory() as temporary:
@@ -640,14 +688,15 @@ class SetupTests(unittest.TestCase):
                 self.assertEqual(len(stale), 1)
                 shutil.rmtree(next((home / '.config/nas-sync/profiles').iterdir()))
                 environment['state']['fail'] = None
-                plan, result = self.run_join(home, environment, folder='again')
+                plan, result = self.run_join(home, environment, folder='again', client_id='c' * 64)
                 self.assertTrue(plan['repair'])
                 nas = json.loads(environment['payloads'][base + '/helper.json'])
-                # Rebuilt from the saved original: the enrolled PC and exactly one new PC.
+                # Preserve every current enrollment; an IP address cannot identify which
+                # certificate, if any, is safe to revoke after an interrupted attempt.
                 self.assertEqual(nas['peers'], ['10.23.42.9', '10.23.42.17'])
-                self.assertEqual(len(nas['clients']), 2)
-                self.assertFalse(stale & set(nas['clients']), "the failed attempt's certificate must not persist")
-                self.assertEqual(environment['payloads'][base + '/ca.pem'].count(b'BEGIN CERTIFICATE'), 2)
+                self.assertEqual(len(nas['clients']), 3)
+                self.assertTrue(stale <= set(nas['clients']))
+                self.assertEqual(environment['payloads'][base + '/ca.pem'].count(b'BEGIN CERTIFICATE'), 3)
                 self.assertIn(str(home / 'again'), result['message'])
 
     def test_only_an_unfinished_additional_setup_can_be_discarded(self):

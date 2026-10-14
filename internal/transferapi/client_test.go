@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -100,6 +101,23 @@ func TestClientTLSRoundTrip(t *testing.T) {
 	}
 	if len(c.changes) != 1 {
 		t.Fatal("unbounded notifications")
+	}
+}
+
+func TestClientReportsUnacceptedEnrollment(t *testing.T) {
+	f := setup(t, true, nil)
+	c := newTestClient(t, clientOptions(f))
+	request := &tls.CertificateRequestInfo{
+		Version:          tls.VersionTLS13,
+		SignatureSchemes: []tls.SignatureScheme{tls.ECDSAWithP256AndSHA256},
+		AcceptableCAs:    [][]byte{[]byte("another PC's issuer")},
+	}
+	if certificate, err := c.tls.GetClientCertificate(request); err == nil || certificate != nil || !strings.Contains(err.Error(), "repair its enrollment") {
+		t.Fatalf("unaccepted enrollment: certificate=%v, error=%v", certificate != nil, err)
+	}
+	request.AcceptableCAs = nil
+	if certificate, err := c.tls.GetClientCertificate(request); err != nil || certificate == nil {
+		t.Fatalf("unrestricted issuer request: %v", err)
 	}
 }
 

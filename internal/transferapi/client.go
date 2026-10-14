@@ -200,6 +200,15 @@ func NewClient(o ClientOptions) (*Client, error) {
 		}
 		return nil
 	}}
+	// There is exactly one enrolled identity. The default TLS selector silently
+	// sends an empty certificate when the NAS no longer lists its issuer, hiding
+	// a stale enrollment behind the server's "certificate required" alert.
+	c.tls.GetClientCertificate = func(request *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+		if err := request.SupportsCertificate(&o.Certificate); err != nil {
+			return nil, fmt.Errorf("NAS does not accept this PC's client certificate; repair its enrollment and restart the NAS helper: %w", err)
+		}
+		return &o.Certificate, nil
+	}
 	c.transport = &http.Transport{Proxy: nil, ForceAttemptHTTP2: false, MaxConnsPerHost: 2, MaxIdleConnsPerHost: 1, MaxIdleConns: 1, IdleConnTimeout: 15 * time.Second, TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: operationTimeout, DisableCompression: true, TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{}, DialTLSContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 		// The URL host names the configured endpoint; the connection goes to the
 		// NAS's current address, which the locator may have moved.

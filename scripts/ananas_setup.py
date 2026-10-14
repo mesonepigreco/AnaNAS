@@ -715,8 +715,8 @@ def make_join_plan(session, inventory, share, local, managed, helper):
     # certificate alone, so DHCP renumbering never locks a PC out. Only a helper set
     # to lockPeerAddresses tracks enrolled PCs by address.
     locked = bool(config.get("lockPeerAddresses"))
-    # An unfinished attempt from this PC left its address behind. The saved originals
-    # let that attempt be undone and redone cleanly instead of refusing forever.
+    # A saved snapshot can identify an interrupted enrollment, but is never used
+    # as replacement configuration: other PCs may have enrolled since then.
     repair = bool(locked and source in config.get("peers", []) and original and source not in original.get("peers", []))
     if locked and source in config.get("peers", []) and not repair:
         raise SetupError("This PC's address is already allowed by that helper. If sync is not configured here, remove the stale entry on the NAS before retrying.")
@@ -769,6 +769,32 @@ def join(session, inventory, plan, helper, progress=lambda message: None):
         raise SetupError(message) from None
 
 
+def verify_enrollment(config, route):
+    """Require an authenticated API response, not just a running launcher PID."""
+    if lan(config['nas']['host']) != route:
+        raise SetupError('The LAN connection changed before enrollment could be verified.')
+    sync = config['sync']
+    context = ssl.create_default_context(cafile=sync['ca'])
+    context.check_hostname = False  # The pinned leaf identifies a DHCP-addressed NAS.
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    context.load_cert_chain(sync['certificate'], sync['privateKey'])
+    connection = http.client.HTTPSConnection(config['nas']['host'], sync['port'], context=context,
+                                             timeout=5, source_address=(route['source'], 0))
+    try:
+        connection.connect()
+        if hashlib.sha256(connection.sock.getpeercert(binary_form=True)).hexdigest() != sync['serverFingerprint']:
+            raise SetupError('The NAS helper certificate changed during enrollment.')
+        connection.request('GET', '/v1/state', headers={'X-Ananas-Namespace': sync['namespace'], 'Connection': 'close'})
+        response = connection.getresponse()
+        data = response.read(1025)
+        if response.status != 200 or len(data) > 1024 or not json.loads(data).get('epoch'):
+            raise SetupError('The NAS helper did not accept this PC enrollment.')
+    except (OSError, http.client.HTTPException, ValueError, AttributeError) as error:
+        raise SetupError('The NAS helper could not authenticate this PC. Check its client CA bundle and restart the helper.') from error
+    finally:
+        connection.close()
+
+
 def _join(session, inventory, plan, helper, progress):
     """Add this PC to an installed helper. The synchronized directory, the helper's
     own identity and every already-enrolled PC are left exactly as they are."""
@@ -778,11 +804,11 @@ def _join(session, inventory, plan, helper, progress):
         raise SetupError("The LAN connection changed. Reconnect and try again.")
     q = shlex.quote
     base, root, source = plan["base"], plan["nasRoot"], plan["route"]["source"]
-    config = dict(helper["original"] if plan.get("repair") and helper.get("original") else helper["config"])
+    config = dict(helper["config"])
     if config.get("root") != root:
         raise SetupError("The installed helper no longer serves this directory. Refresh the folder list and retry.")
     locked = bool(config.get("lockPeerAddresses"))
-    if locked and source in config.get("peers", []):
+    if locked and source in config.get("peers", []) and not plan.get("repair"):
         raise SetupError("This PC is already allowed by that helper. It has not been changed.")
     profile = Path(plan["profile"])
     profile.mkdir(mode=0o700, parents=True)
@@ -834,23 +860,21 @@ def _join(session, inventory, plan, helper, progress):
     except SetupError:
         verifiable = False
     progress("Adding this PC to the NAS helper's allowed list…")
-    if locked:
+    if locked and source not in config.get("peers", []):
         config["peers"] = list(config.get("peers", [])) + [source]
     config["clients"] = dict(config.get("clients", {}), **{pin: identity})
     # Two PCs each need their own connection and notification stream.
     config["maxConnections"] = max(int(config.get("maxConnections", 2)), min(8, 2 * len(config["clients"])))
     # Recorded before the first change, so a later failure never reports the NAS as untouched.
     atomically(record, json.dumps({"phase": "nas-updating", "plan": plan}, indent=2).encode())
-    for path, data in ((config["clientCA"], None), (base + "/helper.json", json.dumps(config).encode())):
-        backup = path + ".before-enroll"
-        # Kept from the first attempt only, so a retry never overwrites the pristine
-        # copy, and a retry's bundle is rebuilt from it rather than appended twice.
+    # Snapshot the current installation for this transaction. An older attempt's
+    # backup must never replace trust or configuration added by another PC.
+    for path in (config["clientCA"], base + "/helper.json", base + "/service.sh"):
         remote(session, "saving the original " + Path(path).name,
-               "set -eu; test -e " + q(backup) + " || cp -p " + q(path) + " " + q(backup), admin=True)
-        if data is None:
-            pristine = helper.get("originalCA") or remote(session, "reading the original " + Path(path).name,
-                                                          "head -c 65536 " + q(backup), admin=True).encode()
-            data = (pristine if pristine.endswith(b"\n") else pristine + b"\n") + (tls / "client-ca.pem").read_bytes()
+               "set -eu; cp -p " + q(path) + " " + q(path + ".before-enroll"), admin=True)
+    current_ca = helper["ca"]
+    bundle = current_ca.rstrip() + b"\n" + (tls / "client-ca.pem").read_bytes()
+    for path, data in ((config["clientCA"], bundle), (base + "/helper.json", json.dumps(config).encode())):
         temporary = path + ".enroll-new"
         remote(session, "writing " + Path(path).name,
                "set -eu; umask 077; rm -f " + q(temporary) + "; cat > " + q(temporary) +
@@ -872,14 +896,12 @@ def _join(session, inventory, plan, helper, progress):
     # enrolled PC's own rule so inbound and outbound treatment stay identical. The
     # chains persist until the NAS reboots, so the running rule set is updated as
     # well as the startup script that rebuilds it.
-    service = helper["originalService"] if plan.get("repair") and helper.get("originalService") else helper["service"]
+    service = helper["service"]
     # An unlocked helper needs the direct subnet through its firewall, not this
     # PC's current address; a subnet rule that already exists covers this PC.
     grant = source if locked else str(ipaddress.IPv4Network(config["prefix"]))
     rules, added = firewall_rules(service, list(config.get("peers", [])) + ([] if locked else [grant])), []
-    if plan.get("repair"):
-        rules = [rule for rule in rules if rule["peer"] != source]
-    covered = not locked and any(rule["peer"] == grant for rule in rules)
+    covered = any(rule["peer"] == grant for rule in rules)
     if covered:
         rules = []
     for rule in sorted(rules, key=lambda item: item["end"], reverse=True):
@@ -898,8 +920,6 @@ def _join(session, inventory, plan, helper, progress):
         raise SetupError("The installed helper's startup script could not be updated. This PC was not enrolled.")
     script = base + "/service.sh"
     if added:
-        remote(session, "saving the original service.sh",
-               "set -eu; test -e " + q(script + ".before-enroll") + " || cp -p " + q(script) + " " + q(script + ".before-enroll"), admin=True)
         remote(session, "writing service.sh",
                "set -eu; umask 077; rm -f " + q(script + ".enroll-new") + "; cat > " + q(script + ".enroll-new") +
                "; chmod 755 " + q(script + ".enroll-new") + "; chown 0:0 " + q(script + ".enroll-new") +
@@ -910,6 +930,7 @@ def _join(session, inventory, plan, helper, progress):
         session.command(q(script) + " start", admin=True)
         time.sleep(1)
         session.command(q(script) + " status", admin=True)
+        verify_enrollment(pc_config, session.route)
     except SetupError:
         # The already-enrolled PC must not lose its helper because this PC failed
         # to join: restore the saved originals and start the helper as it was.
@@ -926,14 +947,13 @@ def _join(session, inventory, plan, helper, progress):
             session.command(q(script) + " start", admin=True)
             session.command(q(script) + " status", admin=True)
         except SetupError:
-            raise SetupError("The NAS helper did not restart after this PC was added, and could not be restored automatically. "
+            raise SetupError("The NAS helper failed its restart or authentication check, and could not be restored automatically. "
                              "Its original files are saved beside it with the suffix .before-enroll; restore them on the NAS and "
                              "run " + script + " start.") from None
-        raise SetupError("The NAS helper did not restart after this PC was added, so its previous configuration was restored (" +
+        raise SetupError("The NAS helper failed its restart or authentication check, so its previous configuration was restored (" +
                          ", ".join(restored) + ") and it is running again. This PC was not enrolled.") from None
-    # The originals only protect this attempt. Left behind, a later enrollment would
-    # restore or "repair" from this old snapshot and undo every change made since,
-    # such as a switch to subnet peers.
+    # The snapshots only protect this attempt. Remove them after verification;
+    # older installers could otherwise restore outdated configuration from them.
     remote(session, "removing this attempt's saved originals",
            "rm -f " + " ".join(q(path + ".before-enroll") for path in (config["clientCA"], base + "/helper.json", script)), admin=True)
     atomically(config_path, json.dumps(pc_config, indent=2).encode())
