@@ -138,7 +138,7 @@ func Compare(ctx context.Context, db *index.DB, root *content.Root, c *journal.C
 		return result, err
 	}
 	verify := func() error {
-		fp, missing, err := root.Metadata(path)
+		fp, missing, err := localMetadata(root, path, base == nil)
 		if err != nil {
 			return err
 		}

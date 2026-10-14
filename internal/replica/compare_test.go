@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -160,5 +161,59 @@ func TestCompareNewAndUnacknowledgedMissingPaths(t *testing.T) {
 	}
 	if base, err := db.Base("file"); err != nil || base != nil {
 		t.Fatal("unacknowledged absence created a tombstone", base, err)
+	}
+}
+
+func TestNeverSyncedMissingTreeDoesNotDeleteRemoteContent(t *testing.T) {
+	for _, remoteExists := range []bool{false, true} {
+		t.Run(fmt.Sprint("remote=", remoteExists), func(t *testing.T) {
+			f, db, root := preparationFixture(t)
+			defer db.Close()
+			name := "temporary/work/figure.tex"
+			if err := db.Put([]index.Record{{Path: name, Missing: true}}, false); err != nil {
+				t.Fatal(err)
+			}
+			remote := &comparisonRemote{}
+			if remoteExists {
+				remote.data = []byte("keep remote file")
+				remote.v = &journal.Version{ID: id("remote-file"), Size: int64(len(remote.data)), Digest: hash.SumBytes(remote.data)}
+			}
+			result, err := Compare(context.Background(), db, root, f.c, remote, name, comparisonOptions())
+			if err != nil || result.Local != nil {
+				t.Fatal(result, err)
+			}
+			if remoteExists {
+				if result.Cleared || result.Decision.Action != diff.Pull {
+					t.Fatal("remote content discarded", result)
+				}
+			} else if !result.Cleared || result.Decision.Action != diff.Noop {
+				t.Fatal(result)
+			}
+		})
+	}
+}
+
+func TestMissingTreeRecreatedDuringComparisonIsNotAcknowledged(t *testing.T) {
+	f, db, root := preparationFixture(t)
+	defer db.Close()
+	name := "temporary/work/figure.tex"
+	if err := db.Put([]index.Record{{Path: name, Missing: true}}, false); err != nil {
+		t.Fatal(err)
+	}
+	remote := &comparisonRemote{onHead: func() {
+		if err := os.MkdirAll(filepath.Join(f.root, "temporary/work"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(f.root, name), []byte("new content"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	result, err := Compare(context.Background(), db, root, f.c, remote, name, comparisonOptions())
+	if !errors.Is(err, content.ErrChanged) || result.Cleared {
+		t.Fatal(result, err)
+	}
+	r, _, _ := db.Get(name)
+	if !r.Dirty {
+		t.Fatal("new content acknowledged without transfer")
 	}
 }

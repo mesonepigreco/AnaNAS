@@ -3,8 +3,10 @@ package replica
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -101,5 +103,70 @@ func TestGlobalFailuresAreNotQuarantinedAsFileProblems(t *testing.T) {
 	deferred, err := w.deferLocalFailure(context.Background(), &localPathError{"file", 1, os.ErrNotExist}, &workerPass{})
 	if deferred || !errors.Is(err, ErrAttention) {
 		t.Fatal("missing root treated as missing file", deferred, err)
+	}
+}
+
+func TestDisappearingSourceRefreshesObservationAndRetries(t *testing.T) {
+	for _, nested := range []bool{false, true} {
+		t.Run(fmt.Sprint("nested=", nested), func(t *testing.T) {
+			f, db, root := preparationFixture(t)
+			defer db.Close()
+			name := "file"
+			if nested {
+				name = "temporary/work/file"
+				if err := os.MkdirAll(filepath.Join(f.root, "temporary/work"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			observeFile(t, db, f.root, name, []byte("temporary"))
+			before, _, _ := db.Get(name)
+			if err := os.RemoveAll(filepath.Join(f.root, strings.Split(name, "/")[0])); err != nil {
+				t.Fatal(err)
+			}
+			w := &Worker{db: db, root: root, c: f.c, store: f.store, opts: WorkerOptions{Namespace: id("remote namespace")}}
+			pass := workerPass{}
+			deferred, err := w.deferLocalFailure(context.Background(), &localPathError{name, before.Generation, os.ErrNotExist}, &pass)
+			if err != nil || !deferred || pass.retry == nil || pass.attention != nil {
+				t.Fatal(deferred, err, pass)
+			}
+			after, _, _ := db.Get(name)
+			if !after.Missing || after.Generation <= before.Generation {
+				t.Fatal(after)
+			}
+			issue, err := db.SyncIssue(after)
+			if err != nil || issue == nil || !issue.Retry {
+				t.Fatal(issue, err)
+			}
+			if err := db.ClearTransientIssues(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			result, err := Compare(context.Background(), db, root, f.c, &comparisonRemote{}, name, comparisonOptions())
+			if err != nil || !result.Cleared || result.Local != nil {
+				t.Fatal(result, err)
+			}
+		})
+	}
+}
+
+func TestAncestorAbsenceNeverBypassesHistoryOrUnsafePaths(t *testing.T) {
+	f, db, root := preparationFixture(t)
+	defer db.Close()
+	if _, missing, err := localMetadata(root, "missing/child/file", false); err == nil || missing {
+		t.Fatal("retained history accepted missing parent", missing, err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(f.root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if _, missing, err := localMetadata(root, "link/child/file", true); err == nil || missing {
+		t.Fatal("symlink accepted as absence", missing, err)
+	}
+	if err := os.Rename(f.root, f.root+"-old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(f.root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, missing, err := localMetadata(root, "missing/child/file", true); err == nil || missing {
+		t.Fatal("replaced root accepted as absence", missing, err)
 	}
 }

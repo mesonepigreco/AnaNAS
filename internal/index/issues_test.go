@@ -118,3 +118,30 @@ func TestIssuesAreGenerationBoundAndManualRetryDoesNotAcknowledge(t *testing.T) 
 		t.Fatal(issue, r, err)
 	}
 }
+
+func TestLegacyMissingFileIssueIsRetriedWithoutClearingWork(t *testing.T) {
+	db := openSyncTest(t)
+	ctx := context.Background()
+	for _, name := range []string{"temporary/work/file", "permission"} {
+		if err := db.Put([]Record{{Path: name, Missing: true}}, false); err != nil {
+			t.Fatal(err)
+		}
+		reason := fmt.Sprintf("Blocked: local file %q: no such file or directory", name)
+		if name == "permission" {
+			reason = "Blocked: local file \"permission\": permission denied"
+		}
+		if err := db.RecordSyncIssue(name, 1, reason, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.ClearTransientIssues(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"temporary/work/file", "permission"} {
+		r, _, _ := db.Get(name)
+		issue, err := db.SyncIssue(r)
+		if err != nil || !r.Dirty || r.Generation != 1 || (issue != nil) != (name == "permission") {
+			t.Fatal(r, issue, err)
+		}
+	}
+}

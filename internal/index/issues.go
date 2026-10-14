@@ -106,7 +106,11 @@ func (d *DB) ClearTransientIssues(ctx context.Context) error {
 			if err := json.Unmarshal(v, &issue); err != nil {
 				return err
 			}
-			if issue.Retry {
+			// Older workers permanently blocked ENOENT, including never-synced
+			// temporary trees. Retry that exact legacy error through current
+			// filesystem checks; do not acknowledge or discard any dirty work.
+			legacyMissing := issue.Reason == fmt.Sprintf("Blocked: local file %q: no such file or directory", string(k))
+			if issue.Retry || legacyMissing {
 				keys = append(keys, append([]byte(nil), k...))
 			}
 			return nil

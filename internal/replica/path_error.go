@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"syscall"
 
 	"nas-sync/internal/content"
@@ -20,6 +21,29 @@ type localPathError struct {
 
 func (e *localPathError) Error() string { return fmt.Sprintf("local file %q: %v", e.Path, e.Err) }
 func (e *localPathError) Unwrap() error { return e.Err }
+
+// A never-synchronized path can be absent because a temporary ancestor was
+// removed. Prove that absence beneath a still-accessible ancestor. Retained
+// bases continue to require exact-leaf checks before interpreting a deletion.
+func localMetadata(root *content.Root, name string, untracked bool) (index.Fingerprint, bool, error) {
+	fp, missing, err := root.Metadata(name)
+	if !untracked || !errors.Is(err, os.ErrNotExist) {
+		return fp, missing, err
+	}
+	for parent := path.Dir(name); parent != "."; parent = path.Dir(parent) {
+		_, missing, err = root.Metadata(parent)
+		if err == nil {
+			if missing {
+				return index.Fingerprint{}, true, nil
+			}
+			return index.Fingerprint{}, false, content.ErrChanged
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return index.Fingerprint{}, false, err
+		}
+	}
+	return index.Fingerprint{}, false, err
+}
 
 func isolatable(err error) bool {
 	return errors.Is(err, content.ErrChanged) || errors.Is(err, content.ErrUnsupported) || errors.Is(err, index.ErrStale) || errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) || errors.Is(err, journal.ErrConflict) || errors.Is(err, journal.ErrPending) || errors.Is(err, ErrAttention) || errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.EISDIR) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.EXDEV)
@@ -50,8 +74,12 @@ func (w *Worker) deferLocalFailure(ctx context.Context, err error, pass *workerP
 	if !ok {
 		return false, nil
 	}
-	if errors.Is(err, content.ErrChanged) && r.Generation == failure.Generation {
-		fp, missing, e := w.root.Metadata(r.Path)
+	if (errors.Is(err, content.ErrChanged) || errors.Is(err, os.ErrNotExist)) && r.Generation == failure.Generation {
+		base, e := w.db.Base(r.Path)
+		if e != nil {
+			return false, e
+		}
+		fp, missing, e := localMetadata(w.root, r.Path, base == nil)
 		if e == nil {
 			r.Missing = missing
 			if !missing {
@@ -66,7 +94,7 @@ func (w *Worker) deferLocalFailure(ctx context.Context, err error, pass *workerP
 			}
 		}
 	}
-	retry := errors.Is(err, content.ErrChanged) || errors.Is(err, index.ErrStale) || errors.Is(err, journal.ErrPending) || r.Generation != failure.Generation
+	retry := errors.Is(err, os.ErrNotExist) || errors.Is(err, content.ErrChanged) || errors.Is(err, index.ErrStale) || errors.Is(err, journal.ErrPending) || r.Generation != failure.Generation
 	reason := err.Error()
 	if retry {
 		reason = "Will retry: " + reason
