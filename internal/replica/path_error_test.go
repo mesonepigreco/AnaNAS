@@ -148,11 +148,14 @@ func TestDisappearingSourceRefreshesObservationAndRetries(t *testing.T) {
 	}
 }
 
-func TestAncestorAbsenceNeverBypassesHistoryOrUnsafePaths(t *testing.T) {
+func TestAncestorAbsenceRequiresOptInAndRejectsUnsafePaths(t *testing.T) {
 	f, db, root := preparationFixture(t)
 	defer db.Close()
 	if _, missing, err := localMetadata(root, "missing/child/file", false); err == nil || missing {
-		t.Fatal("retained history accepted missing parent", missing, err)
+		t.Fatal("strict metadata accepted missing parent", missing, err)
+	}
+	if _, missing, err := localMetadata(root, "missing/child/file", true); err != nil || !missing {
+		t.Fatal("confirmed missing ancestor was not accepted", missing, err)
 	}
 	if err := os.Symlink(t.TempDir(), filepath.Join(f.root, "link")); err != nil {
 		t.Fatal(err)

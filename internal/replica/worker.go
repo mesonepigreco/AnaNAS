@@ -489,8 +489,24 @@ func (w *Worker) turn(ctx context.Context, pass *workerPass) (bool, error) {
 			return false, err
 		}
 		pass.fetch = true
+		for _, e := range u.Proposal.Entries {
+			if e.Next.Tombstone {
+				// A child deletion can unblock an earlier directory. Revisit it
+				// now, including grandparents, without waiting for another event.
+				pass.cursor, pass.requestCursor = "", ""
+				pass.requestsDone = false
+				pass.attention = nil
+				break
+			}
+		}
 	}
 	for i, c := range comparisons {
+		if c.Cleared {
+			// Clearing a never-uploaded missing child also unblocks its parent.
+			pass.cursor, pass.requestCursor = "", ""
+			pass.requestsDone = false
+			pass.attention = nil
+		}
 		if c.Decision.Action != diff.Push && !c.Cleared {
 			reason := fmt.Sprintf("Needs reconciliation: %s (%s)", paths[i], c.Decision.Action)
 			if err := w.db.RecordSyncIssue(paths[i], c.Generation, reason, false); err != nil {
@@ -615,11 +631,11 @@ func (w *Worker) selectRecords(page []index.Record, after string) ([]string, str
 				return nil, "", err
 			}
 			if base != nil && base.Content.Directory {
-				children, err := w.db.PagePrefix(r.Path+"/", "", 1)
+				pending, err := w.directoryChildrenPending(r.Path)
 				if err != nil {
 					return nil, "", err
 				}
-				if len(children) != 0 {
+				if pending {
 					attention = fmt.Errorf("%w: directory deletion %q requires child reconciliation; other eligible files continue", ErrAttention, r.Path)
 					next = r.Path
 					continue
@@ -636,4 +652,32 @@ func (w *Worker) selectRecords(page []index.Record, after string) ([]string, str
 		next = r.Path
 	}
 	return paths, next, attention
+}
+
+// Retained tombstone records are history, not live children. Check bounded pages
+// so deleting a populated directory can finish after its descendants commit.
+func (w *Worker) directoryChildrenPending(name string) (bool, error) {
+	after := ""
+	for {
+		children, err := w.db.PagePrefix(name+"/", after, journal.MaxEntries)
+		if err != nil {
+			return false, err
+		}
+		if len(children) == 0 {
+			return false, nil
+		}
+		for _, child := range children {
+			if !child.Missing || child.Dirty || child.Excluded {
+				return true, nil
+			}
+			base, err := w.db.Base(child.Path)
+			if err != nil {
+				return false, err
+			}
+			if base != nil && !base.Content.Tombstone {
+				return true, nil
+			}
+			after = child.Path
+		}
+	}
 }

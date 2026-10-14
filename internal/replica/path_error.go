@@ -22,12 +22,12 @@ type localPathError struct {
 func (e *localPathError) Error() string { return fmt.Sprintf("local file %q: %v", e.Path, e.Err) }
 func (e *localPathError) Unwrap() error { return e.Err }
 
-// A never-synchronized path can be absent because a temporary ancestor was
-// removed. Prove that absence beneath a still-accessible ancestor. Retained
-// bases continue to require exact-leaf checks before interpreting a deletion.
-func localMetadata(root *content.Root, name string, untracked bool) (index.Fingerprint, bool, error) {
+// A removed or renamed directory also removes its old descendant paths.
+// Confirm a missing ancestor beneath an accessible, unchanged parent and root;
+// never infer absence from permission errors, symlinks or an unavailable root.
+func localMetadata(root *content.Root, name string, allowMissingAncestor bool) (index.Fingerprint, bool, error) {
 	fp, missing, err := root.Metadata(name)
-	if !untracked || !errors.Is(err, os.ErrNotExist) {
+	if !allowMissingAncestor || !errors.Is(err, os.ErrNotExist) {
 		return fp, missing, err
 	}
 	for parent := path.Dir(name); parent != "."; parent = path.Dir(parent) {
@@ -75,11 +75,7 @@ func (w *Worker) deferLocalFailure(ctx context.Context, err error, pass *workerP
 		return false, nil
 	}
 	if (errors.Is(err, content.ErrChanged) || errors.Is(err, os.ErrNotExist)) && r.Generation == failure.Generation {
-		base, e := w.db.Base(r.Path)
-		if e != nil {
-			return false, e
-		}
-		fp, missing, e := localMetadata(w.root, r.Path, base == nil)
+		fp, missing, e := localMetadata(w.root, r.Path, true)
 		if e == nil {
 			r.Missing = missing
 			if !missing {

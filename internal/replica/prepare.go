@@ -173,7 +173,7 @@ func PrepareUpload(ctx context.Context, db *index.DB, root *content.Root, c *jou
 		if pending || !reflect.DeepEqual(base, bases[i]) {
 			return index.ErrStale
 		}
-		fp, missing, err := root.Metadata(s.Path)
+		fp, missing, err := localMetadata(root, s.Path, s.Missing)
 		if err != nil {
 			return err
 		}
