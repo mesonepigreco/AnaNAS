@@ -131,7 +131,12 @@ wizard does not invoke them.
   DHCP. The daemon omits `sync.source` and follows the PC's current address in
   the direct prefix. The NAS helper listens on `":PORT"` (eth0's current address;
   the launcher waits for it at boot and rebinds if it changes), and its peers and
-  iptables rule authorize the prefix. If the NAS stops answering at `nas.host`,
+  iptables rule authorize the prefix. Adding another PC to an unlocked helper
+  only enrolls its certificate: peers and a subnet firewall rule stay unchanged
+  and the PC config has no `sync.source`. Only a helper with
+  `lockPeerAddresses` gains this PC's address in `peers`, the firewall and
+  `sync.source`. A successful enrollment removes its `.before-enroll` snapshots
+  so a later enrollment cannot restore an outdated helper configuration. If the NAS stops answering at `nas.host`,
   the daemon and the mount helper search the direct subnet for the pinned helper
   certificate; the mount is re-checked by a two-minute timer and remounted if the
   NAS moved. Interface or subnet changes still require configuration maintenance.

@@ -287,8 +287,9 @@ class SetupTests(unittest.TestCase):
         for path in ('/share/Volume/Public', '/share/Volume/Public/Team/Sub', '/share/Volume/Other'):
             self.assertIsNone(setup.managed_helper(inventory, path))
 
-    def helper_fixture(self, directory, route, base='/share/Volume/.ananas-0123456789abcdef', legacy=False):
-        """Trust material and configuration as an already-installed helper holds them."""
+    def helper_fixture(self, directory, route, base='/share/Volume/.ananas-0123456789abcdef', legacy=False, locked=True):
+        """Trust material and configuration as an already-installed helper holds them.
+        A locked helper admits listed addresses; an unlocked one its direct subnet."""
         pins = setup.certificates(directory, route['host'], '10.23.42.9')
         chain = 'AN0123456789ab'
         config = dict(liveWrites=True, root='/share/Volume/Public/Team', stateDir=base + '/state',
@@ -298,10 +299,16 @@ class SetupTests(unittest.TestCase):
                       clients={pins['client']: 'a' * 64}, exclusions=['@Recycle/'], maxConnections=2,
                       maxFileBytes=8 << 30, maxBatchBytes=8 << 30, maxCacheBytes=1 << 40,
                       maxCacheEntries=1000000, readBytesPerSecond=1073741824)
+        if locked:
+            config['lockPeerAddresses'] = True
+        else:
+            config['peers'] = [route['prefix']]
         service = ('#!/bin/sh\nset -eu\ncase "${1:-}" in\nstart)\n if ! /sbin/iptables -nL %s >/dev/null 2>&1; then\n'
                    '  /sbin/iptables -N %s\n  /sbin/iptables -A %s -s 10.23.42.9 -i eth0 -j ACCEPT\n'
                    '  /sbin/iptables -A %s -j DROP\n  /sbin/iptables -I INPUT 1 -p tcp --dport 18742 -j %s\n fi\n ;;\n'
                    'stop) :;;\nstatus) :;;\n*) exit 2;;\nesac\n') % (chain, chain, chain, chain, chain)
+        if not locked:
+            service = service.replace('-s 10.23.42.9 ', '-s ' + route['prefix'] + ' ')
         if legacy:
             # The historical live-trial script: separate inbound and outbound chains.
             service = ('#!/bin/sh\nset -eu\ncase "${1:-}" in\n  start)\n'
@@ -320,8 +327,8 @@ class SetupTests(unittest.TestCase):
                     rules=setup.firewall_rules(service, config['peers']),
                     ca=(directory / 'ca.pem').read_bytes(), server=(directory / 'server.pem').read_bytes())
 
-    def test_join_adds_this_pc_without_disturbing_the_installed_helper(self):
-        """A second PC enrolls with its own issuer; no existing private key is reused."""
+    def join_scenario(self, check, locked=True):
+        """Enroll a second PC against a simulated installed helper, then check it."""
         route = dict(host='10.23.42.30', source='10.23.42.17', interface='enp1s0', prefix='10.23.42.0/24')
         base = '/share/Volume/.ananas-0123456789abcdef'
         share = dict(name='Public', path='/share/Volume/Public')
@@ -369,7 +376,7 @@ class SetupTests(unittest.TestCase):
                     patch.object(setup.time, 'sleep'):
                 existing = home / 'installed-helper'
                 existing.mkdir()
-                helper = self.helper_fixture(existing, route, base)
+                helper = self.helper_fixture(existing, route, base, locked=locked)
                 payloads[base + '/helper.json'] = json.dumps(helper['config']).encode()
                 payloads[base + '/service.sh'] = helper['service'].encode()
                 payloads[base + '/ca.pem'] = helper['ca']
@@ -380,40 +387,66 @@ class SetupTests(unittest.TestCase):
                 plan = setup.make_join_plan(session, inventory, share, str(home / 'files'), managed, read)
                 self.assertEqual((plan['port'], plan['namespace'], plan['uid']), (18742, 'c' * 64, os.getuid()))
                 result = setup.join(session, inventory, plan, read, lambda message: None)
-                self.assertIn(str(home / 'files'), result['message'])
-                self.assertEqual(len(privileged), 1)
-                nas = json.loads(payloads[base + '/helper.json'])
-                pc = json.loads((Path(plan['profile']) / 'config.json').read_bytes())
-                # The installed helper keeps its identity, root and first PC.
-                self.assertEqual(nas['root'], helper['config']['root'])
-                self.assertEqual(nas['namespace'], helper['config']['namespace'])
-                self.assertEqual(nas['peers'], ['10.23.42.9', '10.23.42.17'])
-                self.assertEqual(len(nas['clients']), 2)
-                self.assertLessEqual(nas['maxConnections'], 8)
-                self.assertGreaterEqual(nas['maxConnections'], 4)
-                for pin, identity in helper['config']['clients'].items():
-                    self.assertEqual(nas['clients'][pin], identity)
-                # This PC speaks the helper's namespace with a replica identity of its own.
-                self.assertEqual(pc['sync']['namespace'], nas['namespace'])
-                self.assertNotEqual(pc['sync']['replicaNamespace'], pc['sync']['namespace'])
-                self.assertEqual(pc['sync']['serverFingerprint'],
-                                 hashlib.sha256(original_run(['openssl', 'x509', '-outform', 'DER'], data=helper['server'])).hexdigest())
-                pin = hashlib.sha256(original_run(['openssl', 'x509', '-in', str(Path(plan['profile']) / 'tls/client.pem'), '-outform', 'DER'])).hexdigest()
-                self.assertEqual(nas['clients'][pin], 'b' * 64)
-                # The NAS trusts both issuers; the first PC's key never left its PC.
-                self.assertEqual(payloads[base + '/ca.pem'].count(b'BEGIN CERTIFICATE'), 2)
-                self.assertIn(helper['ca'].strip(), payloads[base + '/ca.pem'])
-                self.assertNotIn(b'PRIVATE KEY', payloads[base + '/ca.pem'])
-                updated = payloads[base + '/service.sh'].decode()
-                subprocess.run(['/bin/sh', '-n'], input=payloads[base + '/service.sh'], check=True)
-                self.assertLess(updated.index('-s 10.23.42.17 -i eth0 -j ACCEPT'), updated.index('-j DROP'))
-                self.assertIn('-s 10.23.42.9 -i eth0 -j ACCEPT', updated)
-                self.assertTrue(any('iptables -I ' + helper['chain'] + ' 1 -s 10.23.42.17' in c for c in calls))
-                self.assertTrue(any('iptables -C ' + helper['chain'] + ' -s 10.23.42.17' in c for c in calls))
-                self.assertTrue(any(' start' in c for c in calls))
-                for path in Path(plan['profile']).glob('*.json'):
-                    self.assertNotIn(session.password.encode(), path.read_bytes())
-                self.assertEqual(json.loads((Path(plan['profile']) / 'setup.json').read_bytes())['phase'], 'started')
+                check(home=home, plan=plan, result=result, helper=helper, payloads=payloads, calls=calls,
+                      privileged=privileged, session=session, base=base, original_run=original_run)
+
+    def test_join_adds_this_pc_without_disturbing_the_installed_helper(self):
+        """A second PC enrolls with its own issuer; no existing private key is reused."""
+        def check(home, plan, result, helper, payloads, calls, privileged, session, base, original_run):
+            self.assertIn(str(home / 'files'), result['message'])
+            self.assertEqual(len(privileged), 1)
+            nas = json.loads(payloads[base + '/helper.json'])
+            pc = json.loads((Path(plan['profile']) / 'config.json').read_bytes())
+            # The installed helper keeps its identity, root and first PC.
+            self.assertEqual(nas['root'], helper['config']['root'])
+            self.assertEqual(nas['namespace'], helper['config']['namespace'])
+            self.assertEqual(nas['peers'], ['10.23.42.9', '10.23.42.17'])
+            self.assertEqual(len(nas['clients']), 2)
+            self.assertLessEqual(nas['maxConnections'], 8)
+            self.assertGreaterEqual(nas['maxConnections'], 4)
+            for pin, identity in helper['config']['clients'].items():
+                self.assertEqual(nas['clients'][pin], identity)
+            # This PC speaks the helper's namespace with a replica identity of its own.
+            self.assertEqual(pc['sync']['namespace'], nas['namespace'])
+            self.assertNotEqual(pc['sync']['replicaNamespace'], pc['sync']['namespace'])
+            self.assertEqual(pc['sync']['serverFingerprint'],
+                             hashlib.sha256(original_run(['openssl', 'x509', '-outform', 'DER'], data=helper['server'])).hexdigest())
+            pin = hashlib.sha256(original_run(['openssl', 'x509', '-in', str(Path(plan['profile']) / 'tls/client.pem'), '-outform', 'DER'])).hexdigest()
+            self.assertEqual(nas['clients'][pin], 'b' * 64)
+            # The NAS trusts both issuers; the first PC's key never left its PC.
+            self.assertEqual(payloads[base + '/ca.pem'].count(b'BEGIN CERTIFICATE'), 2)
+            self.assertIn(helper['ca'].strip(), payloads[base + '/ca.pem'])
+            self.assertNotIn(b'PRIVATE KEY', payloads[base + '/ca.pem'])
+            updated = payloads[base + '/service.sh'].decode()
+            subprocess.run(['/bin/sh', '-n'], input=payloads[base + '/service.sh'], check=True)
+            self.assertLess(updated.index('-s 10.23.42.17 -i eth0 -j ACCEPT'), updated.index('-j DROP'))
+            self.assertIn('-s 10.23.42.9 -i eth0 -j ACCEPT', updated)
+            self.assertTrue(any('iptables -I ' + helper['chain'] + ' 1 -s 10.23.42.17' in c for c in calls))
+            self.assertTrue(any('iptables -C ' + helper['chain'] + ' -s 10.23.42.17' in c for c in calls))
+            self.assertTrue(any(' start' in c for c in calls))
+            # A later enrollment must never restore from this attempt's snapshot.
+            self.assertTrue(any(c.startswith('rm -f ') and base + '/helper.json.before-enroll' in c for c in calls))
+            for path in Path(plan['profile']).glob('*.json'):
+                self.assertNotIn(session.password.encode(), path.read_bytes())
+            self.assertEqual(json.loads((Path(plan['profile']) / 'setup.json').read_bytes())['phase'], 'started')
+        self.join_scenario(check)
+
+    def test_join_by_default_admits_the_subnet_without_pinning_this_pc(self):
+        """An unlocked helper authenticates PCs by certificate alone: enrolling leaves
+        its subnet peers and firewall untouched and never pins this PC's address."""
+        def check(home, plan, result, helper, payloads, calls, privileged, session, base, original_run):
+            nas = json.loads(payloads[base + '/helper.json'])
+            pc = json.loads((Path(plan['profile']) / 'config.json').read_bytes())
+            self.assertEqual(nas['peers'], ['10.23.42.0/24'])
+            self.assertNotIn('lockPeerAddresses', nas)
+            self.assertEqual(len(nas['clients']), 2)
+            self.assertGreaterEqual(nas['maxConnections'], 4)
+            self.assertNotIn('source', pc['sync'])
+            self.assertEqual(payloads[base + '/service.sh'].decode(), helper['service'])
+            self.assertFalse(any('iptables -I' in c for c in calls))
+            self.assertTrue(any(' start' in c for c in calls))
+            self.assertEqual(json.loads((Path(plan['profile']) / 'setup.json').read_bytes())['phase'], 'started')
+        self.join_scenario(check, locked=False)
 
     def test_join_refuses_an_off_subnet_or_already_enrolled_pc(self):
         route = dict(host='10.23.42.30', source='10.23.42.17', interface='enp1s0', prefix='10.23.42.0/24')

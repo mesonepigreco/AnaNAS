@@ -23,15 +23,19 @@ import (
 )
 
 type Config struct {
-	LiveWrites         bool              `json:"liveWrites"`
-	ObserverStateDir   string            `json:"observerStateDir,omitempty"`
-	Root               string            `json:"root"`
-	StateDir           string            `json:"stateDir"`
-	Namespace          string            `json:"namespace"`
-	Listen             string            `json:"listen"`
-	Interface          string            `json:"interface"`
-	Prefix             string            `json:"prefix"`
-	Peers              []string          `json:"peers"`
+	LiveWrites       bool     `json:"liveWrites"`
+	ObserverStateDir string   `json:"observerStateDir,omitempty"`
+	Root             string   `json:"root"`
+	StateDir         string   `json:"stateDir"`
+	Namespace        string   `json:"namespace"`
+	Listen           string   `json:"listen"`
+	Interface        string   `json:"interface"`
+	Prefix           string   `json:"prefix"`
+	Peers            []string `json:"peers"`
+	// LockPeerAddresses admits only the addresses/subnets in Peers. By default
+	// any address in the direct Prefix is admitted, so DHCP renumbering never
+	// rejects an enrolled PC; its pinned client certificate authenticates it.
+	LockPeerAddresses  bool              `json:"lockPeerAddresses,omitempty"`
 	UID                int               `json:"uid"`
 	GID                int               `json:"gid"`
 	Groups             []int             `json:"groups"`
@@ -89,8 +93,8 @@ func (c Config) Validate() error {
 	if c.Interface == "" || len(c.Interface) > 15 || strings.ContainsAny(c.Interface, "/\\\x00 \t\r\n") || (endpoint.Addr().IsLoopback() != (c.Interface == "lo")) {
 		return fmt.Errorf("explicit matching network interface required")
 	}
-	if len(c.Peers) < 1 || len(c.Peers) > 64 {
-		return fmt.Errorf("one to 64 explicit peers required")
+	if len(c.Peers) > 64 || (c.LockPeerAddresses && len(c.Peers) < 1) {
+		return fmt.Errorf("up to 64 peers required, at least one when addresses are locked")
 	}
 	seen := make(map[netip.Prefix]bool, len(c.Peers))
 	for _, peer := range c.Peers {

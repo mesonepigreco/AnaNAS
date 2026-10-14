@@ -3,6 +3,7 @@ package helper
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -163,28 +164,21 @@ func (s *Service) Serve(ctx context.Context, listener net.Listener) error {
 		return err
 	}
 	defer limited.Close()
-	peers := make([]netip.Prefix, 0, len(s.config.Peers))
-	for _, peer := range s.config.Peers {
-		p, err := ParsePeer(peer)
-		if err != nil {
-			listener.Close()
-			return err
-		}
-		peers = append(peers, p)
-	}
-	allowed := func(address netip.Addr) bool {
-		for _, p := range peers {
-			if p.Contains(address) {
-				return true
-			}
-		}
-		return false
+	allowed, err := s.config.PeerFilter()
+	if err != nil {
+		listener.Close()
+		return err
 	}
 	server := transferapi.HTTPServer(s.api)
 	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		peer, err := netip.ParseAddrPort(r.RemoteAddr)
 		if err != nil || !allowed(peer.Addr()) {
-			http.Error(w, "peer not allowed", http.StatusForbidden)
+			// JSON, so the PC panel names the cause instead of a bare "Forbidden".
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(struct {
+				Error string `json:"error"`
+			}{fmt.Sprintf("NAS helper does not admit address %s: it is not in the locked peers list", peer.Addr())})
 			return
 		}
 		s.api.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), peerKey{}, peer.Addr())))

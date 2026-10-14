@@ -89,3 +89,36 @@ func (c Config) Resolved() (Config, error) {
 	c.Listen = netip.AddrPortFrom(address, port).String()
 	return c, nil
 }
+
+// PeerFilter reports which client addresses may open a connection. By default
+// every address in the direct prefix is admitted, whatever "peers" lists: DHCP
+// can renumber an enrolled PC at any reboot, and a pinned address then rejected
+// it until someone edited the NAS by hand. The pinned client certificate
+// authenticates, and each connection is still bound to the direct interface and
+// route-checked for its actual address. LockPeerAddresses restricts admission
+// to the listed peers for deployments with fixed addresses.
+func (c Config) PeerFilter() (func(netip.Addr) bool, error) {
+	direct, err := netip.ParsePrefix(c.Prefix)
+	if err != nil {
+		return nil, err
+	}
+	peers := []netip.Prefix{direct}
+	if c.LockPeerAddresses {
+		peers = peers[:0]
+		for _, peer := range c.Peers {
+			p, err := ParsePeer(peer)
+			if err != nil {
+				return nil, err
+			}
+			peers = append(peers, p)
+		}
+	}
+	return func(address netip.Addr) bool {
+		for _, p := range peers {
+			if p.Contains(address.Unmap()) {
+				return true
+			}
+		}
+		return false
+	}, nil
+}

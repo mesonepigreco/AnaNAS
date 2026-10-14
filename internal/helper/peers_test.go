@@ -28,3 +28,27 @@ func TestInterfaceSourceFollowsCurrentAddress(t *testing.T) {
 		t.Fatal("address outside the permitted prefix accepted")
 	}
 }
+
+func TestPeerFilterAdmitsDirectSubnetUnlessLocked(t *testing.T) {
+	// A config rewritten with pinned addresses must still admit a PC whose DHCP
+	// lease moved it elsewhere in the direct subnet.
+	c := Config{Prefix: "192.168.1.0/24", Peers: []string{"192.168.1.17", "192.168.1.16"}}
+	allowed, err := c.PeerFilter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for address, want := range map[string]bool{"192.168.1.17": true, "192.168.1.21": true, "::ffff:192.168.1.21": true, "192.168.2.21": false, "10.0.0.1": false} {
+		if got := allowed(netip.MustParseAddr(address)); got != want {
+			t.Fatalf("unlocked %s: got %v", address, got)
+		}
+	}
+	c.LockPeerAddresses = true
+	if allowed, err = c.PeerFilter(); err != nil {
+		t.Fatal(err)
+	}
+	for address, want := range map[string]bool{"192.168.1.17": true, "192.168.1.16": true, "192.168.1.21": false} {
+		if got := allowed(netip.MustParseAddr(address)); got != want {
+			t.Fatalf("locked %s: got %v", address, got)
+		}
+	}
+}

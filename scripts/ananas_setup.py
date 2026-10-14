@@ -711,10 +711,14 @@ def make_join_plan(session, inventory, share, local, managed, helper):
         raise SetupError("This synchronized folder is not inside the selected share. Choose the share that contains it.")
     source = session.route["source"]
     original = helper.get("original")
+    # By default the helper admits its whole direct subnet and authenticates PCs by
+    # certificate alone, so DHCP renumbering never locks a PC out. Only a helper set
+    # to lockPeerAddresses tracks enrolled PCs by address.
+    locked = bool(config.get("lockPeerAddresses"))
     # An unfinished attempt from this PC left its address behind. The saved originals
     # let that attempt be undone and redone cleanly instead of refusing forever.
-    repair = bool(source in config.get("peers", []) and original and source not in original.get("peers", []))
-    if source in config.get("peers", []) and not repair:
+    repair = bool(locked and source in config.get("peers", []) and original and source not in original.get("peers", []))
+    if locked and source in config.get("peers", []) and not repair:
         raise SetupError("This PC's address is already allowed by that helper. If sync is not configured here, remove the stale entry on the NAS before retrying.")
     if len(config.get("peers", [])) >= 64 or len(config.get("clients", {})) >= 64:
         raise SetupError("That helper already has the maximum number of enrolled PCs.")
@@ -777,7 +781,8 @@ def _join(session, inventory, plan, helper, progress):
     config = dict(helper["original"] if plan.get("repair") and helper.get("original") else helper["config"])
     if config.get("root") != root:
         raise SetupError("The installed helper no longer serves this directory. Refresh the folder list and retry.")
-    if source in config.get("peers", []):
+    locked = bool(config.get("lockPeerAddresses"))
+    if locked and source in config.get("peers", []):
         raise SetupError("This PC is already allowed by that helper. It has not been changed.")
     profile = Path(plan["profile"])
     profile.mkdir(mode=0o700, parents=True)
@@ -803,11 +808,15 @@ def _join(session, inventory, plan, helper, progress):
     pin = join_certificates(tls, source)
     if pin in config.get("clients", {}) or identity in config.get("clients", {}).values():
         raise SetupError("That helper already lists this PC's identity. Remove the stale entry on the NAS before retrying.")
-    pc_config["sync"] = {"enabled": True, "port": plan["port"], "source": source,
+    # No fixed "source" unless the helper locks addresses: the daemon follows the
+    # PC's current DHCP address in the direct prefix.
+    pc_config["sync"] = {"enabled": True, "port": plan["port"],
                          "namespace": plan["namespace"], "replicaNamespace": secrets.token_hex(32),
                          "certificate": str(tls / "client.pem"), "privateKey": str(tls / "client.key"), "ca": str(tls / "ca.pem"),
                          "serverFingerprint": server_pin, "maxFileBytes": config.get("maxFileBytes", 8589934592),
                          "maxBatchBytes": config.get("maxBatchBytes", 8589934592), "maxCacheEntries": 1000000}
+    if locked:
+        pc_config["sync"]["source"] = source
     owner = f"{plan['account']['uid']}:{plan['account']['gid']}"
     check = shlex.join(["/bin/busybox", "start-stop-daemon", "-S", "-c", owner, "-x", base + "/helper",
                         "--", "-config", base + "/helper.json", "-check-config"])
@@ -825,10 +834,11 @@ def _join(session, inventory, plan, helper, progress):
     except SetupError:
         verifiable = False
     progress("Adding this PC to the NAS helper's allowed list…")
-    config["peers"] = list(config.get("peers", [])) + [source]
+    if locked:
+        config["peers"] = list(config.get("peers", [])) + [source]
     config["clients"] = dict(config.get("clients", {}), **{pin: identity})
     # Two PCs each need their own connection and notification stream.
-    config["maxConnections"] = max(int(config.get("maxConnections", 2)), min(8, 2 * len(config["peers"])))
+    config["maxConnections"] = max(int(config.get("maxConnections", 2)), min(8, 2 * len(config["clients"])))
     # Recorded before the first change, so a later failure never reports the NAS as untouched.
     atomically(record, json.dumps({"phase": "nas-updating", "plan": plan}, indent=2).encode())
     for path, data in ((config["clientCA"], None), (base + "/helper.json", json.dumps(config).encode())):
@@ -863,12 +873,18 @@ def _join(session, inventory, plan, helper, progress):
     # chains persist until the NAS reboots, so the running rule set is updated as
     # well as the startup script that rebuilds it.
     service = helper["originalService"] if plan.get("repair") and helper.get("originalService") else helper["service"]
-    rules, added = firewall_rules(service, config.get("peers", [])), []
+    # An unlocked helper needs the direct subnet through its firewall, not this
+    # PC's current address; a subnet rule that already exists covers this PC.
+    grant = source if locked else str(ipaddress.IPv4Network(config["prefix"]))
+    rules, added = firewall_rules(service, list(config.get("peers", [])) + ([] if locked else [grant])), []
     if plan.get("repair"):
         rules = [rule for rule in rules if rule["peer"] != source]
+    covered = not locked and any(rule["peer"] == grant for rule in rules)
+    if covered:
+        rules = []
     for rule in sorted(rules, key=lambda item: item["end"], reverse=True):
-        text = re.sub(r"(?<![0-9.])" + re.escape(rule["peer"]) + r"(?![0-9.])", source, rule["text"])
-        if text == rule["text"] or source not in text:
+        text = re.sub(r"(?<![0-9.])" + re.escape(rule["peer"]) + r"(?![0-9.])", grant, rule["text"])
+        if text == rule["text"] or grant not in text:
             raise SetupError("The installed helper's firewall rules could not be extended to this PC. They have not been changed.")
         if text in service:
             raise SetupError("The installed helper's startup script already allows this PC. It has not been changed.")
@@ -878,15 +894,16 @@ def _join(session, inventory, plan, helper, progress):
                arguments.replace(rule["chain"], rule["chain"] + " 1", 1), admin=True)
         service = service[:rule["end"]] + "\n" + rule["indent"] + text + service[rule["end"]:]
         added.append(text)
-    if not added:
+    if not added and not covered:
         raise SetupError("The installed helper's startup script could not be updated. This PC was not enrolled.")
     script = base + "/service.sh"
-    remote(session, "saving the original service.sh",
-           "set -eu; test -e " + q(script + ".before-enroll") + " || cp -p " + q(script) + " " + q(script + ".before-enroll"), admin=True)
-    remote(session, "writing service.sh",
-           "set -eu; umask 077; rm -f " + q(script + ".enroll-new") + "; cat > " + q(script + ".enroll-new") +
-           "; chmod 755 " + q(script + ".enroll-new") + "; chown 0:0 " + q(script + ".enroll-new") +
-           "; mv " + q(script + ".enroll-new") + " " + q(script), admin=True, data=service.encode(), timeout=120)
+    if added:
+        remote(session, "saving the original service.sh",
+               "set -eu; test -e " + q(script + ".before-enroll") + " || cp -p " + q(script) + " " + q(script + ".before-enroll"), admin=True)
+        remote(session, "writing service.sh",
+               "set -eu; umask 077; rm -f " + q(script + ".enroll-new") + "; cat > " + q(script + ".enroll-new") +
+               "; chmod 755 " + q(script + ".enroll-new") + "; chown 0:0 " + q(script + ".enroll-new") +
+               "; mv " + q(script + ".enroll-new") + " " + q(script), admin=True, data=service.encode(), timeout=120)
     remote(session, "stopping the helper", q(script) + " stop || true", admin=True)
     time.sleep(1)
     try:
@@ -914,6 +931,11 @@ def _join(session, inventory, plan, helper, progress):
                              "run " + script + " start.") from None
         raise SetupError("The NAS helper did not restart after this PC was added, so its previous configuration was restored (" +
                          ", ".join(restored) + ") and it is running again. This PC was not enrolled.") from None
+    # The originals only protect this attempt. Left behind, a later enrollment would
+    # restore or "repair" from this old snapshot and undo every change made since,
+    # such as a switch to subnet peers.
+    remote(session, "removing this attempt's saved originals",
+           "rm -f " + " ".join(q(path + ".before-enroll") for path in (config["clientCA"], base + "/helper.json", script)), admin=True)
     atomically(config_path, json.dumps(pc_config, indent=2).encode())
     progress("Starting this folder's sync daemon…")
     if local.resolve() != local or any(local.iterdir()):

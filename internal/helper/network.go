@@ -131,7 +131,12 @@ func CheckNetwork(ctx context.Context, c Config) error {
 	if !found {
 		return fmt.Errorf("helper address/prefix is no longer on the permitted interface")
 	}
-	peers := c.Peers
+	var peers []string
+	if c.LockPeerAddresses {
+		// Unlocked helpers ignore the configured list; a stale pinned address
+		// must not keep them from starting after a DHCP renumbering.
+		peers = c.Peers
+	}
 	if peer, ok := ctx.Value(peerKey{}).(netip.Addr); ok {
 		peers = []string{peer.String()}
 	}

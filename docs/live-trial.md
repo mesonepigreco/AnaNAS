@@ -29,6 +29,16 @@ found the NAS by searching the subnet and resumed sync, and a file create and
 delete then propagated. A real NAS renumbering (and the timer-driven remount)
 has not yet been observed.
 
+The PC-side fix regressed when the helper configuration was later rewritten from a
+pre-DHCP snapshot that pinned two PC addresses. After the next PC reboot, its new
+lease was refused with "NAS protocol status 403: Forbidden". The helper now admits
+its whole direct prefix unless `lockPeerAddresses` is set; setup enrollment no
+longer pins addresses or keeps stale `.before-enroll` snapshots. On the deployed
+QNAP, the updated helper admitted the renumbered PC with the pinned configuration
+still in place. With `lockPeerAddresses` enabled, it refused the PC and named the
+address. The subnet configuration was then restored. The daemon reconnected
+without a restart, and a file create and delete reached the NAS within seconds.
+
 The desktop panel was checked for folder/terminal actions, pending-file
 confirmation, automatic refresh and complete wrapped status details. Indicator
 errors and paths use compact menu labels. Closing a panel hides its persistent

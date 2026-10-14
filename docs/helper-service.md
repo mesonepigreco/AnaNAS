@@ -64,10 +64,14 @@ The service uses TLS 1.3, a private client CA and leaf-certificate allowlist. Th
 PC also pins the server certificate and binds its source address/interface. With
 `sync.source` omitted, the source is the single address the interface currently
 holds in `nas.prefix`, re-read before every check and dial so a DHCP lease change
-does not take sync offline. Helper `peers` (and launcher `-peer`) accept either
-one address or a canonical subnet inside the direct prefix; a subnet authorizes a
-DHCP client while each accepted connection is still route-checked for its actual
-address and authenticated by its certificate pin.
+does not take sync offline. By default the helper admits every address in its
+direct `prefix`, whatever `peers` lists: each accepted connection is still bound
+to the direct interface, route-checked for its actual address and authenticated
+by its certificate pin. A helper config rewritten with pinned peer addresses
+therefore keeps admitting a renumbered PC. `"lockPeerAddresses": true` opts into
+fixed addressing: only the addresses or canonical subnets in `peers` (at least
+one) are admitted, and a rejected PC sees "NAS helper does not admit address …".
+Launcher `-peer` accepts one address or a canonical subnet inside the prefix.
 
 The NAS address may also change. A helper `listen` of `":PORT"` means the
 interface's current address in the prefix: the launcher waits for it at boot,

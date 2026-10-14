@@ -167,8 +167,11 @@ For manual inspection or an advanced installation, start with
 
 The helper's native NAS path, interface, runtime UID/GID and TLS identities also
 need to match that NAS; [config.helper.example.json](config.helper.example.json)
-documents its fields; `peers` may list the direct client subnet so the PC keeps
-access when DHCP changes its address. Keep helper state outside the synchronized data. The legacy
+documents its fields. By default the helper admits any PC address in its direct
+`prefix` and authenticates it by certificate pin, so DHCP renumbering of either
+machine never locks a PC out; `peers` is then informational. Set
+`"lockPeerAddresses": true` only for fixed-address deployments: the helper then
+admits just the addresses or subnets listed in `peers`. Keep helper state outside the synchronized data. The legacy
 `remote` SSH section is not the native content-sync transport. The wizard configures
 the native TLS transport automatically.
 

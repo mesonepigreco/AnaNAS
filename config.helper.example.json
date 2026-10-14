@@ -8,6 +8,7 @@
   "interface": "eth0",
   "prefix": "10.23.42.0/24",
   "peers": ["10.23.42.0/24"],
+  "lockPeerAddresses": false,
   "uid": 1000,
   "gid": 100,
   "groups": [100],
