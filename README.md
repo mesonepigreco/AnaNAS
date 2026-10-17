@@ -87,6 +87,29 @@ Failed desktop actions do not falsely report a daemon crash.
 Indicator menu labels stay on one line and are shortened to 72 characters;
 long synchronization errors direct you to the control panel for full details.
 
+Incoming changes that cannot be applied safely are retained as **sync problems**.
+Only the affected path and related parent/child operations wait; unrelated files
+continue syncing. A broken pineapple and a conditional **Resolve sync problems…**
+menu open a dialog explaining the received change and three choices:
+
+- **Try again safely** repeats the normal publication checks.
+- **Save local copy and follow NAS…** moves the local item, including its contents,
+  into the profile's private `recovered` directory, then applies the received NAS
+  state. If the NAS removed the old name during a rename, that old name disappears
+  locally; the new name arrives through ordinary sync. This action does not write
+  to the NAS. Recovery copies are retained until you remove them.
+- **Keep versions separate…** suspends uploads and downloads for that path and its
+  contents. **Review paths kept separate…** lets you revisit the decision.
+
+Confirmation dialogs explain the consequences and default to Cancel. Recovery
+requests survive restart and reject choices based on an outdated NAS version.
+The **Settings** tab includes **Notify me about sync problems**. Turning it off
+suppresses desktop notifications while leaving the icon and recovery controls
+available. The choice persists per profile. `notifications.syncProblems` in the
+JSON configuration supplies the default (`true`); a saved Settings choice takes
+precedence. Notifications open the recovery dialog and do not force a modal
+window over your work.
+
 “Synced to NAS (files)” shows the percentage of included local files whose current
 observed versions have been confirmed synchronized, plus the pending file count.
 It counts files equally, including empty files; same-size edits remain pending
@@ -224,8 +247,9 @@ from unit tests and must be configured for the intended environment.
 
 The implementation includes regular-file synchronization, delta updates, observed
 file deletion/recreation, folder creation, durable pause, LAN policy checks and
-separate native NAS observation. General directory-tree deletion, conflict-choice
-UI, never-observed head reconciliation, history reclamation, enrollment into an
+separate native NAS observation, remote directory renames and incoming-conflict
+recovery. Broader directory-tree deletion and conflict acceptance, never-observed
+head reconciliation, history reclamation, enrollment into an
 existing helper from another PC, and resumable setup transactions remain open.
 The wizard sets an 8 GiB per-file and per-batch limit (the protocol maximum).
 Content is streamed through disk-backed snapshots and delta spools; free local

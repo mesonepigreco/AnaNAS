@@ -125,6 +125,9 @@ type Limits struct {
 
 // Config is the effective, fully-defaulted configuration.
 type Config struct {
+	Notifications struct {
+		SyncProblems bool `json:"syncProblems"`
+	} `json:"notifications"`
 	Sync Sync `json:"sync"`
 	// LANGuard enforces that automatic sync only ever touches a LAN mount.
 	LANGuard bool   `json:"lanGuard"`
@@ -155,7 +158,7 @@ func DefaultPath() string {
 
 // Default returns the built-in defaults, merged over later by file values.
 func Default() *Config {
-	return &Config{
+	cfg := &Config{
 		LANGuard:   true,
 		ScanRemote: Duration(15 * time.Minute),
 		BlockSize:  64 * 1024, // 64 KiB content blocks (BLAKE3 digests)
@@ -175,6 +178,8 @@ func Default() *Config {
 			MaxBytes:   4 << 20,
 		},
 	}
+	cfg.Notifications.SyncProblems = true
+	return cfg
 }
 
 // Load reads the file at path (if present) and overlays it on the defaults.

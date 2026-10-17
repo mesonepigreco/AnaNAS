@@ -168,7 +168,11 @@ func (d *DB) NASTree(ctx context.Context, directory, after string) (result NASTr
 					return err
 				}
 			}
-			if base != nil && base.Content.ID == version.ID && !local.Missing && !local.Excluded && !local.Dirty && local.Path != "" {
+			blocked, err := incomingBlocked(tx, p)
+			if err != nil {
+				return err
+			}
+			if !blocked && base != nil && base.Content.ID == version.ID && !local.Missing && !local.Excluded && !local.Dirty && local.Path != "" {
 				result.SyncedFiles++
 				child.SyncedFiles++
 			}

@@ -4,13 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"nas-sync/internal/index"
 	"net/http"
 	"time"
 )
 
 type TreeControls struct {
-	Snapshot   func(context.Context, string, string) (any, error)
-	Prioritize func(context.Context, string) error
+	Problems      Details
+	Resolve       func(context.Context, index.IncomingChoice) error
+	Notifications func(context.Context, bool) error
+	Snapshot      func(context.Context, string, string) (any, error)
+	Prioritize    func(context.Context, string) error
 }
 
 func treeHandler(token string, tree TreeControls) http.HandlerFunc {

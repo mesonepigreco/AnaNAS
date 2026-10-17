@@ -44,6 +44,28 @@ confirmation, automatic refresh and complete wrapped status details. Indicator
 errors and paths use compact menu labels. Closing a panel hides its persistent
 process, so installed module updates require restarting that process.
 
+An incoming remote rename exposed missing directory-identity receipts on folders
+originally uploaded by the receiving PC. The old publisher required those receipts
+to retire the old names, and its missing-file error blocked later incoming work.
+Directory uploads now retain the receipt before transmission. A separate regression
+found that a downloaded path could be renamed before watcher indexing; download
+completion now durably seeds its observation before clearing the inbox operation.
+
+The PC update was deployed against the existing blocked journal. It retained three
+path decisions, drained unrelated work, and recovered the two old parent folders
+using **Save local copy and follow NAS**. Their local remainders were moved outside
+the sync root. All 25 files under the three new directory names matched NAS hashes,
+and the production pending/problem queues became empty. The live indicator switched
+from the broken pineapple back to normal. Notification opt-out persisted through
+a daemon restart, and the original preference was restored after the check.
+
+A native NAS/SMB rename hardware check found a further observer limitation: missing
+ancestor paths and directory deletions were refused. Children-first reconciliation
+now checks live journal descendants and verifies the first missing component under
+an accessible pinned parent. Its TLS rename/deletion regression passes in both
+lexical directions. Deployment and hardware recheck of this NAS-side extension
+still require an authenticated NAS administrator session.
+
 Setup has unit/widget coverage for QNAP identification, host-key handling,
 credential cleanup, folder ordering, bounded previews and failure recovery.
 Its installation transaction is tested with simulated NAS/system operations and
@@ -61,6 +83,14 @@ LAN; authenticated fresh-install acceptance remains separate.
   file percentages and automatic visible-tab refresh.
 - GTK mouse/keyboard menus, Cancel-default Trash confirmation, missing-item and
   permission-error handling, short menu labels and uncropped status details.
+- Two independent PC identities using a real TLS helper: remote directory renames
+  in both lexical directions, concurrent local edit preservation, unrelated upload
+  progress during a conflict, and subtree recovery with the exact edit saved.
+- Incoming decisions across index restart, backup replay, never-published child
+  restoration, an already-prepared legacy directory deletion, stale/overlapping
+  request rejection, separated-subtree inheritance, and CSRF/origin enforcement.
+- Native recovery dialog choices and Cancel default, notification suppression and
+  deduplication, persistent checkbox settings, and visual contrast/layout checks.
 
 Full Go unit/race suites, vet and builds passed for the reliability changes.
 Subsequent absence/refresh changes passed affected index/replica/web unit/race
@@ -70,6 +100,13 @@ a whole-file fixture; it does not establish multi-gigabyte NAS throughput.
 Desktop launch and Trash calls are mocked in widget tests; production files were
 not deleted to test the confirmation button.
 
+The rename/recovery changes passed `go test ./...`, `go test -race ./...`,
+`go vet ./...`, `go build ./...` and `git diff --check`, using the temporary Go
+caches documented in README. Native Python tests passed for recovery (3), control
+panel (6) and indicator (18), plus the existing setup coverage. GTK visual checks
+used synthetic conflicts; production recovery used the same authenticated API
+called by the dialog. An ARM64 helper build was also produced for deployment.
+
 See [reliability audit](reliability-audit.md) for the failure matrix and
 [README](../README.md#development-and-tests) for reproduction commands. Hardware
 tests and long soak tests need separate, explicitly configured environments.
@@ -78,7 +115,7 @@ tests and long soak tests need separate, explicitly configured environments.
 
 Fresh-NAS provisioning, NAS reboot, multi-folder production synchronization,
 interrupted-install recovery, broader firmware compatibility, power-loss recovery,
-full directory-tree deletion, conflict choices, never-observed head reconciliation
+broader directory-tree deletion and conflict-choice acceptance, never-observed head reconciliation
 and history reclamation remain incomplete. This application is not a backup
 replacement.
 

@@ -102,7 +102,11 @@ func (d *DB) DirectoryUsage(ctx context.Context, path string) (Usage, error) {
 			// Equal byte totals do not prove synchronization: edits can preserve
 			// length, and empty files still need publication. Only a clean current
 			// generation with a confirmed regular-file base counts.
-			if kind.IsRegular() && !r.Dirty {
+			blocked, err := incomingBlocked(tx, string(k))
+			if err != nil {
+				return err
+			}
+			if !blocked && kind.IsRegular() && !r.Dirty {
 				base, err := readBase(tx, string(k))
 				if err != nil {
 					return err

@@ -65,12 +65,18 @@ in [live-trial.md](live-trial.md).
 
 ## Remaining boundaries
 
-This is not a proof that synchronization can never stop. A prepared remote
-publication still serializes journal work: corruption or a conflict at that point
-requires recovery/reconciliation, not skipping its sequence. Remote conflict
-choices, general directory-tree deletion, never-observed remote-head reconciliation,
-automatic history reclamation and broad power-loss/NAS reboot acceptance remain
-open. A missing parent is not treated as proof that all descendants were deleted.
+This is not a proof that synchronization can never stop. The subsequent incoming
+recovery update retains path-specific publication failures as durable decisions
+while committing their logical journal state, so independent paths can proceed.
+It preserves received content and blocks related uploads until recovery; it does
+not drop the failed change. See [live-trial.md](live-trial.md) for rename, backup
+replay and desktop-choice coverage.
+
+Native directory absence is now verified at the first missing component beneath
+an accessible pinned root/parent. Directory tombstones wait for retained live
+descendants, with the check repeated under the journal publication lock. Broader
+tree-deletion/conflict acceptance, never-observed remote-head reconciliation,
+automatic history reclamation and power-loss/NAS reboot acceptance remain open.
 ENOSPC/EIO, exhausted retention budgets and identity/policy failures cannot safely
 be hidden by continuing to publish dependent changes.
 

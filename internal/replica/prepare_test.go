@@ -58,6 +58,9 @@ func TestPrepareUploadBatchesFileAndDirectory(t *testing.T) {
 	if _, err := f.store.OpenReady(u.Proposal.Entries[1].Next.ID); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("directory snapshot exists", err)
 	}
+	if matches, err := f.publisher.MatchExternalDirectory(context.Background(), "folder", content.Fingerprint(st), u.Proposal.Entries[1].Next.ID); err != nil || !matches {
+		t.Fatal("directory upload did not retain its local identity", matches, err)
+	}
 	if pending, err := db.PendingUploadPreparation(); err != nil || pending != nil {
 		t.Fatal(pending, err)
 	}
@@ -138,6 +141,52 @@ func TestPrepareUploadFailureRetainsProvenanceAndNewerEdit(t *testing.T) {
 	u, _, err := PrepareUpload(context.Background(), db, root, f.c, f.store, &comparisonRemote{}, []string{"file"}, p.Namespace, completionOptions())
 	if err != nil || u == nil || u.Generations[0] != r.Generation {
 		t.Fatal("fresh preparation failed", u, err)
+	}
+}
+
+func TestDirectoryUploadPreparationAbortRemovesReceipt(t *testing.T) {
+	f, db, root := preparationFixture(t)
+	defer db.Close()
+	path := filepath.Join(f.root, "folder")
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := index.Record{Path: "folder", Fingerprint: content.Fingerprint(info)}
+	if err := db.Put([]index.Record{r}, false); err != nil {
+		t.Fatal(err)
+	}
+	o := completionOptions()
+	var receipt string
+	o.Gate = func(context.Context) error {
+		p, err := db.PendingUploadPreparation()
+		if err != nil {
+			return err
+		}
+		if p != nil && receipt == "" {
+			name := filepath.Join(f.state, p.Sources[0].ID+".directory")
+			if _, err := os.Stat(name); err == nil {
+				receipt = name
+				return db.Put([]index.Record{r}, true)
+			}
+		}
+		return nil
+	}
+	namespace := id("remote namespace")
+	if _, _, err := PrepareUpload(context.Background(), db, root, f.c, f.store, &comparisonRemote{}, []string{"folder"}, namespace, o); !errors.Is(err, index.ErrStale) || receipt == "" {
+		t.Fatal("changed directory became sendable", err)
+	}
+	if err := AbortUploadPreparation(context.Background(), db, f.c, f.store, namespace); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(receipt); !os.IsNotExist(err) {
+		t.Fatal("aborted directory receipt retained", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("source directory changed", err)
 	}
 }
 

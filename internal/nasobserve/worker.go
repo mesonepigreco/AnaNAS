@@ -175,7 +175,13 @@ func (w *Worker) capture(ctx context.Context, r index.Record) error {
 			return err
 		}
 		if head.Directory {
-			return fmt.Errorf("directory deletion requires children-first reconciliation")
+			live, err := w.c.LiveDescendant(r.Path)
+			if err != nil {
+				return err
+			}
+			if live {
+				return fmt.Errorf("directory deletion awaits child acknowledgements")
+			}
 		}
 	}
 	mode := os.FileMode(r.Fingerprint.Mode)
@@ -241,6 +247,17 @@ func (w *Worker) capture(ctx context.Context, r index.Record) error {
 		p.Entries[0].Next = journal.Version{ID: version.Hex(), Directory: true}
 	}
 	_, err = w.c.ImportExternal(ctx, w.c.Epoch(), p, func(ctx context.Context, resume bool) (journal.Version, error) {
+		// Repeat under the coordinator's publication lock: a peer may have
+		// committed a child after the preliminary scheduling check above.
+		if r.Missing && head != nil && head.Directory {
+			live, err := w.c.LiveDescendant(r.Path)
+			if err != nil {
+				return p.Entries[0].Next, err
+			}
+			if live {
+				return p.Entries[0].Next, fmt.Errorf("directory deletion awaits child acknowledgements")
+			}
+		}
 		return w.p.CaptureExternal(ctx, p.Entries[0], &r.Fingerprint, w.s, resume)
 	})
 	if err != nil {
@@ -257,6 +274,7 @@ func (w *Worker) capture(ctx context.Context, r index.Record) error {
 		return err
 	}
 	w.update(func(s *Status) { s.Imported++ })
+	w.Notify() // Revisit parents that waited for these child tombstones.
 	_, err = w.db.ClearObserved(r)
 	return err
 }

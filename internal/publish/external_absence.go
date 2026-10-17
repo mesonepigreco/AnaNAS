@@ -5,27 +5,28 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 
 	"golang.org/x/sys/unix"
 	"nas-sync/internal/index"
 	"nas-sync/internal/journal"
 )
 
-// captureExternalAbsence records a confirmed missing regular-file leaf without
-// altering the visible tree. A missing parent, inaccessible root, symlink or
-// changed mount is never interpreted as a deletion. The retained base remains
-// available to replicas and conflict handling.
+// captureExternalAbsence records confirmed absence without altering the tree.
+// A missing ancestor is verified at its first missing component under a pinned,
+// accessible parent/root. Symlinks, permission errors and changed mounts fail.
+// The coordinator's caller orders directory tombstones after live descendants.
 func (p *Publisher) captureExternalAbsence(ctx context.Context, e journal.Entry, want *index.Fingerprint, resume bool) (journal.Version, error) {
 	v := e.Next
 	if !v.Tombstone || v.Directory || v.Size != 0 || e.Expected == "" {
-		return v, fmt.Errorf("external deletion requires an explicit regular-file base")
+		return v, fmt.Errorf("external deletion requires an explicit base")
 	}
 	base, err := p.lookup(e.Expected)
 	if err != nil {
 		return v, err
 	}
-	if base == nil || base.Tombstone || base.Directory {
-		return v, fmt.Errorf("directory deletion requires children-first reconciliation")
+	if base == nil || base.Tombstone {
+		return v, fmt.Errorf("external deletion requires a live base")
 	}
 	if resume {
 		// A sealed absence is historical evidence, like a retained file snapshot.
@@ -36,10 +37,15 @@ func (p *Publisher) captureExternalAbsence(ctx context.Context, e journal.Entry,
 			return v, err
 		}
 	}
-	if want == nil || !os.FileMode(want.Mode).IsRegular() {
-		return v, fmt.Errorf("fresh missing regular-file observation required")
+	if want == nil || (!os.FileMode(want.Mode).IsRegular() && !os.FileMode(want.Mode).IsDir()) {
+		return v, fmt.Errorf("fresh missing file/directory observation required")
 	}
-	parent, name, err := p.parent(e.Path)
+	absent := e.Path
+	parent, name, err := p.parent(absent)
+	for errors.Is(err, unix.ENOENT) && path.Dir(absent) != "." {
+		absent = path.Dir(absent)
+		parent, name, err = p.parent(absent)
+	}
 	if err != nil {
 		return v, err
 	}
@@ -48,7 +54,7 @@ func (p *Publisher) captureExternalAbsence(ctx context.Context, e journal.Entry,
 	if err := unix.Fstatat(int(parent.Fd()), name, &st, unix.AT_SYMLINK_NOFOLLOW); !errors.Is(err, unix.ENOENT) {
 		return v, errors.Join(ErrExternal, err)
 	}
-	if err := p.checkParent(e.Path, parent); err != nil {
+	if err := p.checkParent(absent, parent); err != nil {
 		return v, err
 	}
 	// Flush the observed unlink before publishing its durable journal record.

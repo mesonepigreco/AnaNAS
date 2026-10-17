@@ -59,6 +59,9 @@ func (w *Worker) VerifyLocalProgress(ctx context.Context) error {
 }
 
 func (w *Worker) verifyLocalRecord(ctx context.Context, record index.Record, expected string) {
+	if blocked, err := w.db.IncomingBlocked(record.Path); err != nil || blocked {
+		return
+	}
 	if !record.Dirty || record.Missing || record.Excluded {
 		return
 	}

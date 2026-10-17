@@ -162,6 +162,15 @@ class Client:
     def pending_files(self, after=""):
         return self.pending_request("GET", "/api/pending?" + urllib.parse.urlencode({"after": after}))
 
+    def sync_problems(self, after=''):
+        return self.pending_request('GET', '/api/sync-problems?' + urllib.parse.urlencode({'after': after}))
+
+    def resolve_sync(self, path, revision, choice):
+        return self.pending_request('POST', '/api/resolve-sync', {'path': path, 'revision': revision, 'choice': choice})
+
+    def set_problem_notifications(self, enabled):
+        return self.pending_request('POST', '/api/notifications', {'enabled': enabled})
+
     def nas_tree(self, path='', after=''):
         return self.pending_request('GET', '/api/nas-tree?' + urllib.parse.urlencode({'path': path, 'after': after}))
 
@@ -284,6 +293,9 @@ class Indicator:
         self.bus = None
         self.revision = 0
         self.busy = False
+        self.problem_notice = None
+        self.problem_count = 0
+        self.problem_notification_id = None
         # The menu structure is fixed and is already available to the first
         # GetLayout call.  Treat the initial connecting menu as the baseline:
         # emitting LayoutUpdated while GNOME is doing its first asynchronous
@@ -305,6 +317,8 @@ class Indicator:
 
     def acquired(self, conn, _name):
         self.bus = conn
+        conn.signal_subscribe('org.freedesktop.Notifications', 'org.freedesktop.Notifications', 'ActionInvoked',
+                              '/org/freedesktop/Notifications', None, Gio.DBusSignalFlags.NONE, self.notification_action)
         info = Gio.DBusNodeInfo.new_for_xml(interface_xml())
         self.item_id = conn.register_object("/StatusNotifierItem", info.interfaces[0], self.call, self.prop, None)
         self.menu_id = conn.register_object("/Menu", info.interfaces[1], self.call, self.prop, None)
@@ -346,6 +360,7 @@ class Indicator:
     def changed(self):
         if self.bus is None:
             return
+        self.notify_sync_problems()
         # Metadata counters can change frequently without changing the panel.
         # Avoid making the shell reload/repaint an unchanged menu or icon.
         menu = tuple(self.items().items())
@@ -365,6 +380,7 @@ class Indicator:
         icon = self.icon()
         if icon != self.last_icon:
             self.last_icon = icon
+            self.pixmaps = None
             self.bus.emit_signal(None, "/StatusNotifierItem", ITEM, "NewIcon", None)
         overlay = self.overlay()
         if overlay != self.last_overlay:
@@ -402,7 +418,7 @@ class Indicator:
         return "anaNAS — " + self.sync_summary()
 
     def icon(self):
-        return ICON
+        return 'ananas-broken' if (self.state or {}).get('syncProblems', 0) else ICON
 
     def overlay(self):
         if self.error:
@@ -426,7 +442,7 @@ class Indicator:
             return GLib.Variant("s", values[name])
         if name == "IconPixmap":
             if self.pixmaps is None:
-                self.pixmaps = icon_pixmaps(icon_dir / (ICON + ".svg"))
+                self.pixmaps = icon_pixmaps(icon_dir / (self.icon() + ".svg"))
             return GLib.Variant("a(iiay)", self.pixmaps)
         if name.endswith("Pixmap"):
             return GLib.Variant("a(iiay)", [])
@@ -461,6 +477,8 @@ class Indicator:
             21: ("Set up QNAP…" if self.error or not state.get("automaticWrites") else "Manage sync folders…", True),
             7: ("Refresh daemon status", self.configured and not self.busy),
         })
+        if state.get('syncProblemsTotal', 0):
+            menu[22] = ('Resolve sync problems…' if state.get('syncProblems', 0) else 'Review paths kept separate…', True)
         return {key: (self.menu_text(label), enabled) for key, (label, enabled) in menu.items()}
 
     @staticmethod
@@ -527,7 +545,7 @@ class Indicator:
                 process.wait_check_async(None, self.setup_done)
             except GLib.Error:
                 self.action_done("Could not start QNAP setup. Run the anaNAS installer to repair the setup components.")
-        elif item_id == 6:
+        elif item_id in (6, 22):
             try:
                 process = Gio.Subprocess.new(desktop_command([
                     "/usr/bin/systemd-run", "--user", "--collect", "--quiet",
@@ -536,7 +554,7 @@ class Indicator:
                     "--property=MemoryMax=192M", "--property=CPUQuota=50%",
                     "/usr/bin/python3", str(Path(__file__).resolve()),
                     "--control-panel", "--port", str(self.client.port), "--root", str(self.root),
-                ]), Gio.SubprocessFlags.NONE)
+                ] + (['--resolve'] if item_id == 22 else [])), Gio.SubprocessFlags.NONE)
                 process.wait_check_async(None, self.panel_done)
             except GLib.Error as error:
                 self.panel_failed(error)
@@ -595,7 +613,7 @@ class Indicator:
         self.action_done("The control panel could not start. Try again, or open " + self.client.url + " in your browser.")
 
     def layout(self, parent, depth, names):
-        ids = ([1, 2, 3, 8, 4, 5, 6, 21, 7] if parent == 0 else
+        ids = ([i for i in [1, 2, 3, 22, 8, 4, 5, 6, 21, 7] if i in dict(self.last_menu)] if parent == 0 else
                list(range(9, 9 + RECENT_SLOTS)) if parent == 8 else [])
         children = [] if depth == 0 else [GLib.Variant("(ia{sv}av)", self.layout(i, depth - 1 if depth > 0 else -1, names)) for i in ids]
         return parent, self.properties(parent, names), children
@@ -647,6 +665,32 @@ class Indicator:
                          ("anaNAS", 0, "dialog-error-symbolic", "anaNAS problem",
                           str(message)[:1024], [], {}, -1)),
             None, Gio.DBusCallFlags.NONE, 5000, None, None)
+
+    def notify_sync_problems(self):
+        state = self.state or {}
+        count = state.get('syncProblems', 0)
+        signature = state.get('syncProblemSignature', str(count))
+        new = count > 0 and signature != self.problem_notice and count >= self.problem_count
+        self.problem_notice, self.problem_count = signature, count
+        if not new or not state.get('notifySyncProblems', True):
+            return
+        def sent(connection, result):
+            try:
+                self.problem_notification_id = connection.call_finish(result).unpack()[0]
+            except GLib.Error:
+                pass  # The icon/menu still expose the problem if notifications are unavailable.
+        self.bus.call('org.freedesktop.Notifications', '/org/freedesktop/Notifications',
+                      'org.freedesktop.Notifications', 'Notify',
+                      GLib.Variant('(susssasa{sv}i)', ('anaNAS', self.problem_notification_id or 0,
+                          str(icon_directory() / 'ananas-broken.svg'), 'anaNAS needs a decision',
+                          f'{count} incoming changes could not be applied safely. Local files are preserved; unrelated paths continue syncing.',
+                          ['default', 'Resolve sync problems', 'resolve', 'Resolve…'], {}, -1)),
+                      None, Gio.DBusCallFlags.NONE, 5000, None, sent)
+
+    def notification_action(self, _connection, _sender, _path, _interface, _signal, parameters):
+        notice, action = parameters.unpack()
+        if notice == self.problem_notification_id and action in ('resolve', 'default'):
+            self.event(22, 'clicked')
 
     def control_worker(self):
         while not self.stop.is_set():
@@ -715,6 +759,7 @@ class Indicator:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--control-panel", action="store_true")
+    parser.add_argument('--resolve', action='store_true')
     parser.add_argument("--setup", action="store_true")
     parser.add_argument("--port", type=int)
     parser.add_argument("--root", type=Path)
@@ -727,7 +772,7 @@ def main():
         return
     if args.control_panel and args.port and args.root:
         from ananas_control_panel import run
-        run(Client(args.port), args.root)
+        run(Client(args.port), args.root, args.resolve)
         return
     if args.config == default_config and not args.config.exists():
         # Wizard installations use per-folder profiles. The desktop launcher
@@ -752,7 +797,7 @@ def main():
         raise ValueError("Local root must be absolute")
     if args.control_panel:
         from ananas_control_panel import run
-        run(Client(args.port or config["webPort"]), args.root or root)
+        run(Client(args.port or config["webPort"]), args.root or root, args.resolve)
         return
     Indicator(Client(config["webPort"]), root).run()
 

@@ -116,6 +116,10 @@ func TestWorkerRefusesUnaccountedDirectoryOutboxAfterBootstrap(t *testing.T) {
 	}
 	// A directory-only old outbox has no candidate files, so the private-state
 	// bootstrap alone cannot prove that index work has a reservation.
+	// Emulate the old format; new preparations retain a directory receipt.
+	if err := os.Remove(filepath.Join(f.state, u.Proposal.Entries[0].Next.ID+".directory")); err != nil {
+		t.Fatal(err)
+	}
 	if err := f.c.ConfigureReplicaBudget(journal.PublicationBudget{MaxBytes: 1 << 20, MaxEntries: 4}, namespace); err != nil {
 		t.Fatal(err)
 	}

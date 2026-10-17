@@ -106,4 +106,22 @@ func TestTLSWorkerDirectoryRenameConverges(t *testing.T) {
 			return err == nil && string(b) == "keep contents" && os.IsNotExist(oldErr) && emptyErr == nil && empty.IsDir() && dbErr == nil && len(dirty) == 0 && worker.Status().Phase == "idle"
 		})
 	}
+	// A directory originally uploaded by this PC must also support later NAS
+	// deletion. Logical base adoption alone is not a native identity receipt.
+	for _, path := range []string{"aaa/inner/file", "aaa/inner/empty", "aaa/inner", "aaa"} {
+		base, pending, err := server.c.Head(path)
+		if err != nil || pending || base == nil {
+			t.Fatal(base, pending, err)
+		}
+		p := journal.Proposal{ID: identifier("NAS delete " + path), Client: identifier("other writer"), Entries: []journal.Entry{{Path: path, Expected: base.ID, Next: journal.Version{ID: identifier("deleted " + path), Tombstone: true}}}}
+		if _, err := server.c.Commit(ctx, server.c.Epoch(), p, server.publisher); err != nil {
+			t.Fatal(err)
+		}
+	}
+	worker.Notify()
+	workerWait(t, worker, func() bool {
+		_, err := os.Stat(filepath.Join(rootPath, "aaa"))
+		dirty, dbErr := db.DirtyPage("", 32)
+		return os.IsNotExist(err) && dbErr == nil && len(dirty) == 0 && worker.Status().Phase == "idle"
+	})
 }

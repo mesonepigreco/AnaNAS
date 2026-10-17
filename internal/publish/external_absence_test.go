@@ -129,6 +129,17 @@ func TestExternalAbsenceRefusesUncertainPathAndRestoresCharge(t *testing.T) {
 				}
 				return v, err
 			})
+			if kind == "missing-parent" {
+				if err != nil {
+					t.Fatal("verified ancestor absence refused", err)
+				}
+				head, pending, err := f.c.Head("folder/file")
+				if err != nil || pending || head == nil || !head.Tombstone {
+					t.Fatal(head, pending, err)
+				}
+				contents(t, filepath.Join(f.state, base.ID+".ready"), []byte("original"))
+				return
+			}
 			if err == nil {
 				t.Fatal("uncertain or interrupted deletion committed")
 			}

@@ -92,7 +92,7 @@ func NewWorker(db *index.DB, root *content.Root, c *journal.Coordinator, store *
 	if err != nil {
 		return nil, err
 	}
-	w.puller, err = NewPuller(c, store, publisher, remote, PullOptions{Namespace: o.Namespace, Writes: o.Writes, Exclusions: o.Exclusions, MaxFileBytes: o.MaxFileBytes, MaxBatchBytes: o.MaxBatchBytes, ReadBytesPerSecond: o.ReadBytesPerSecond, Gate: w.check, Active: func(path string) { w.update(func(s *WorkerStatus) { s.ActivePath = path }) }})
+	w.puller, err = NewPuller(c, store, incomingPublisher{db: db, c: c, inner: publisher}, remote, PullOptions{Namespace: o.Namespace, Writes: o.Writes, Exclusions: o.Exclusions, MaxFileBytes: o.MaxFileBytes, MaxBatchBytes: o.MaxBatchBytes, ReadBytesPerSecond: o.ReadBytesPerSecond, Gate: w.check, Active: func(path string) { w.update(func(s *WorkerStatus) { s.ActivePath = path }) }})
 	if err != nil {
 		return nil, err
 	}
@@ -227,6 +227,9 @@ func (w *Worker) Run(ctx context.Context) error {
 			if err != nil {
 				break
 			}
+		}
+		if problems, problemErr := w.db.IncomingProblems(workCtx, ""); err == nil && problemErr == nil && problems.Attention > 0 {
+			pass.attention = fmt.Errorf("%w: %d incoming changes need a decision; use Resolve sync problems", ErrAttention, problems.Attention)
 		}
 		partial := err == nil && pass.retry == nil && pass.attention != nil
 		if err == nil && pass.retry != nil {
@@ -374,6 +377,14 @@ func (w *Worker) turn(ctx context.Context, pass *workerPass) (bool, error) {
 		return false, err
 	} else if p != nil {
 		return true, AbortUploadPreparation(ctx, w.db, w.c, w.store, w.opts.Namespace)
+	}
+	// Finish a previously prepared remote transaction before applying a UI choice.
+	if pending, err := w.c.PendingOperation(); err != nil {
+		return false, err
+	} else if !pending {
+		if more, err := w.resolveIncoming(ctx); more || err != nil {
+			return more, err
+		}
 	}
 	// Process a saved inbox first. At most one 32-record page is fetched per
 	// turn; local work gets a turn before fetching another full remote page.
@@ -561,6 +572,37 @@ func (w *Worker) applyRemote(ctx context.Context, batch *changefeed.Batch) error
 	if _, err := w.puller.Pull(ctx, batch.Proposal); err != nil {
 		return err
 	}
+	for _, e := range batch.Entries {
+		if blocked, err := w.db.IncomingBlocked(e.Path); err != nil {
+			return err
+		} else if blocked {
+			continue
+		}
+		if _, ok, err := w.db.Get(e.Path); err != nil {
+			return err
+		} else if ok {
+			continue
+		}
+		fp, missing, err := localMetadata(w.root, e.Path, true)
+		if err != nil {
+			if rootErr := w.root.CheckAvailable(); rootErr != nil {
+				return rootErr
+			}
+			if !incomingPathError(err) {
+				return err
+			}
+			if err := w.db.RecordIncoming(e, "Could not verify the newly published local path: "+err.Error()); err != nil {
+				return err
+			}
+			continue
+		}
+		if missing && e.Next.Directory {
+			fp.Mode = uint32(os.ModeDir)
+		}
+		if err := w.db.EnsurePublishedObservation(index.Record{Path: e.Path, Fingerprint: fp, Missing: missing}); err != nil {
+			return err
+		}
+	}
 	if err := FinishDownload(ctx, w.db, w.c, w.store, w.opts.Namespace, w.operationOptions()); err != nil {
 		return err
 	}
@@ -586,6 +628,12 @@ func (w *Worker) selectRecords(page []index.Record, after string) ([]string, str
 	var attention error
 	next := after
 	for _, r := range page {
+		if blocked, err := w.db.IncomingBlocked(r.Path); err != nil {
+			return nil, "", err
+		} else if blocked {
+			next = r.Path
+			continue
+		}
 		if reason := index.UnsupportedReason(r, w.opts.MaxFileBytes); reason != "" {
 			if r.Missing {
 				cleared, err := w.db.ClearUnsupportedAbsence(r.Path, r.Generation)

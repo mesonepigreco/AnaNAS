@@ -83,7 +83,17 @@ func (d *DB) FinalizeDownload(namespace string, sequence uint64, operation strin
 				return err
 			}
 		}
-		if err := recordActivity(tx, batch.Entries, "from NAS", time.Now()); err != nil {
+		visible := make([]journal.Entry, 0, len(batch.Entries))
+		for _, e := range batch.Entries {
+			blocked, err := incomingBlocked(tx, e.Path)
+			if err != nil {
+				return err
+			}
+			if !blocked {
+				visible = append(visible, e)
+			}
+		}
+		if err := recordActivity(tx, visible, "from NAS", time.Now()); err != nil {
 			return err
 		}
 		return completeRemote(tx, s, batch)

@@ -58,7 +58,7 @@ def install_files():
             target.mkdir(parents=True, exist_ok=True)
             for name in ("helper", "launcher"):
                 shutil.copy2(stage / arch / name, target / name)
-    for name in ("ananas_setup.py", "ananas_setup_gui.py", "ananas_setup_system.py", "ananas_control_panel.py", "ananas_nas_tree.py"):
+    for name in ("ananas_setup.py", "ananas_setup_gui.py", "ananas_setup_system.py", "ananas_control_panel.py", "ananas_nas_tree.py", "ananas_problems.py"):
         shutil.copy2(repo / "scripts" / name, bin_dir / name)
     shutil.copy2(repo / "scripts/ananas_setup_system.py", destination / "ananas_setup_system.py")
     shutil.copy2(repo / "scripts/nas_sync_indicator.py", bin_dir / "nas-sync-indicator")
@@ -75,7 +75,7 @@ def install_files():
     # the pineapple resolves even before the shell rescans the hicolor theme.
     for icons in (Path.home() / ".local/share/icons/hicolor/scalable/apps", Path.home() / ".local/share/anaNAS/icons"):
         icons.mkdir(parents=True, exist_ok=True)
-        for icon in ("ananas.svg", "ananas-symbolic.svg"):
+        for icon in ("ananas.svg", "ananas-symbolic.svg", "ananas-broken.svg"):
             shutil.copy2(repo / "internal/web/assets" / icon, icons / icon)
     main_desktop = applications / "ananas.desktop"
     if not main_desktop.exists():

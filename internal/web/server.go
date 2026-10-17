@@ -80,6 +80,11 @@ func NewWithPending(port int, snapshot Snapshot, pause PauseControl, details Det
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", indexHandler(token, pause != nil))
 	mux.HandleFunc("/api/status", statusHandler(snapshot))
+	if len(trees) > 0 && trees[0].Problems != nil && trees[0].Resolve != nil {
+		mux.HandleFunc("/api/sync-problems", pendingHandler(token, trees[0].Problems))
+		mux.HandleFunc("/api/resolve-sync", resolutionHandler(token, trees[0]))
+		mux.HandleFunc("/api/notifications", notificationHandler(token, trees[0]))
+	}
 	if len(trees) > 0 && trees[0].Snapshot != nil && trees[0].Prioritize != nil {
 		mux.HandleFunc("/api/nas-tree", treeHandler(token, trees[0]))
 		mux.HandleFunc("/api/prioritize-directory", priorityHandler(token, trees[0]))

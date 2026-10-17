@@ -50,6 +50,12 @@ type ConfirmationResult struct {
 
 func pendingFile(tx *bolt.Tx, r Record, limit int64) (PendingFile, error) {
 	p := PendingFile{Path: r.Path, Size: r.Fingerprint.Size, Generation: r.Generation, Action: "Upload", Reason: "Waiting to sync", Confirmable: true, Requested: tx.Bucket(syncRequests).Get([]byte(r.Path)) != nil}
+	if blocked, err := incomingBlocked(tx, r.Path); err != nil {
+		return p, err
+	} else if blocked {
+		p.Reason, p.Confirmable = "Incoming change needs a decision · Resolve sync problems", false
+		return p, nil
+	}
 	mode := os.FileMode(r.Fingerprint.Mode)
 	if mode.IsDir() {
 		p.Action, p.Size = "Create folder", 0

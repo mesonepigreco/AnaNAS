@@ -35,6 +35,16 @@ addresses, paths, machine identifiers or raw operational logs.
   shared-folder browsing, configured-first ordering, folder and pineapple icons.
 - Independent new sync profiles, native helper provisioning, saved SMB mounting,
   autostart installation and existing-local-profile management.
+- Directory identity receipts for locally uploaded folders and durable observation
+  of downloads before inbox completion. Two-PC rename regressions cover both
+  lexical directions, a rename before watcher indexing, concurrent local edits
+  and continued unrelated-file synchronization.
+- Native NAS/SMB rename handling with confirmed ancestor absence and children-first
+  directory tombstones, guarded by retained live heads rather than watcher timing.
+- Durable incoming-problem isolation and recovery choices: retry, preserve a local
+  copy and follow NAS, or keep the subtree separate. Native recovery dialog,
+  broken pineapple indicator, conditional menu and optional desktop notifications;
+  the notification checkbox persists per profile.
 
 ## Verification scope
 
@@ -52,7 +62,8 @@ public repository. Public examples use fictitious values. See
 ## Remaining work
 
 - Full directory-tree deletion and never-observed journal-head reconciliation.
-- Conflict decisions, selective-sync UI, per-file progress and rate/history UI.
+- Broader conflict-decision acceptance, selective-sync UI, per-file progress and
+  rate/history UI.
 - Safe history/cache reclamation and broader recovery/fault acceptance.
 - Ordinary-user onboarding, QTS share/account creation, and enrollment of another
   PC into an existing helper without replacing its namespace or trust settings.

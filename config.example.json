@@ -1,4 +1,5 @@
 {
+  "notifications": { "syncProblems": true },
   "sync": {"enabled": false},
   "local": {
     "root": "/home/me/Documents/sync"

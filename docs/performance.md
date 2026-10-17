@@ -21,6 +21,13 @@ system; it does not claim sustained throughput or universal idle-resource result
   UI pages remain capped at 200; no whole-file buffering was added by isolation.
   The reliability fault tests establish recovery behavior, not sustained throughput
   or a new memory bound for multi-gigabyte production transfers.
+- Incoming conflicts retain remote versions in the existing journal/cache and
+  block related uploads before hashing. Recovery walks index bases in pages of
+  128; the problem dialog displays at most 200 rows. Status totals/signatures scan
+  problem metadata, not the synchronized filesystem. Recovery copies live outside
+  the synchronized root and are not automatically reclaimed; allow disk space for
+  both retained NAS content and local copies. Large conflict queues and recovery
+  trees still need sustained-load measurement.
 
 ## Desktop and setup
 

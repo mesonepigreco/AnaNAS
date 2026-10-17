@@ -189,7 +189,7 @@ func PrepareUpload(ctx context.Context, db *index.DB, root *content.Root, c *jou
 			if err := check(i); err != nil {
 				return err
 			}
-			if err := store.RequireUploadVacant(s.ID); err != nil {
+			if err := store.RequireExternalVacant(s.ID); err != nil {
 				return err
 			}
 			ids[i] = s.ID
@@ -205,6 +205,11 @@ func PrepareUpload(ctx context.Context, db *index.DB, root *content.Root, c *jou
 			}
 			m := selected[i].Local.Content
 			v := journal.Version{ID: s.ID, Size: m.Size, Directory: m.Directory, Tombstone: m.Tombstone}
+			if m.Directory {
+				if err := store.CaptureDirectoryIdentity(s.ID, s.Fingerprint.Device, s.Fingerprint.Inode); err != nil {
+					return u, err
+				}
+			}
 			if !m.Directory && !m.Tombstone {
 				snapshot, err := root.SnapshotAs(ctx, s.Path, s.Fingerprint, store, s.ID, o.ReadBytesPerSecond)
 				if err != nil {
@@ -294,7 +299,7 @@ func AbortUploadPreparation(ctx context.Context, db *index.DB, c *journal.Coordi
 				if err := ctx.Err(); err != nil {
 					return err
 				}
-				if err := store.AbortUncommittedUpload(s.ID); err != nil {
+				if err := store.AbortExternal(s.ID); err != nil {
 					return err
 				}
 			}

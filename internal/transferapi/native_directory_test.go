@@ -207,6 +207,37 @@ func TestTLSNativeDirectoryObservationReachesReplica(t *testing.T) {
 	if err != nil || after != seq+3 {
 		t.Fatal("delete/recreate/delete should commit exactly three versions", seq, after, err)
 	}
+	// SMB/native directory moves must retire the old subtree children first,
+	// even though their parents are already absent on the NAS filesystem.
+	if err := os.MkdirAll(filepath.Join(rootPath, "native-old/inner/empty"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootPath, "native-old/inner/file"), []byte("native move"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	workerWait(t, worker, func() bool {
+		_, ok, err := nativeDB.Get("native-old/inner/file")
+		b, readErr := os.ReadFile(filepath.Join(server.root, "native-old/inner/file"))
+		return err == nil && ok && readErr == nil && string(b) == "native move" && worker.Status().Phase == "idle"
+	})
+	for _, names := range [][2]string{{"native-old", "native-renamed"}, {"native-renamed", "native-aaa"}} {
+		if err := os.Rename(filepath.Join(server.root, names[0]), filepath.Join(server.root, names[1])); err != nil {
+			t.Fatal(err)
+		}
+		workerWait(t, worker, func() bool {
+			b, readErr := os.ReadFile(filepath.Join(rootPath, names[1], "inner/file"))
+			_, oldErr := os.Stat(filepath.Join(rootPath, names[0]))
+			empty, emptyErr := os.Stat(filepath.Join(rootPath, names[1], "inner/empty"))
+			return readErr == nil && string(b) == "native move" && os.IsNotExist(oldErr) && emptyErr == nil && empty.IsDir() && worker.Status().Phase == "idle"
+		})
+	}
+	if err := os.RemoveAll(filepath.Join(server.root, "native-aaa")); err != nil {
+		t.Fatal(err)
+	}
+	workerWait(t, worker, func() bool {
+		_, err := os.Stat(filepath.Join(rootPath, "native-aaa"))
+		return os.IsNotExist(err) && worker.Status().Phase == "idle"
+	})
 	// A NAS deletion must not discard a PC edit made while synchronization was
 	// paused. Preserve the divergent file and surface attention on resume.
 	if err := os.WriteFile(filepath.Join(rootPath, "from-nas/inner/file"), []byte("shared before conflict"), 0600); err != nil {
@@ -235,7 +266,10 @@ func TestTLSNativeDirectoryObservationReachesReplica(t *testing.T) {
 		t.Fatal(err)
 	}
 	worker.Notify()
-	workerWait(t, worker, func() bool { return worker.Status().Phase == "attention" })
+	workerWait(t, worker, func() bool { return worker.Status().Phase == "partial" })
+	if issue, err := db.Incoming("from-nas/inner/file"); err != nil || issue == nil {
+		t.Fatal("conflicting deletion has no durable decision", issue, err)
+	}
 	if data, err := os.ReadFile(filepath.Join(rootPath, "from-nas/inner/file")); err != nil || string(data) != "keep this PC edit" {
 		t.Fatal("NAS deletion lost divergent PC edit", string(data), err)
 	}

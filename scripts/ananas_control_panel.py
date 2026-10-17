@@ -36,6 +36,9 @@ def local_time(value):
 
 CSS = b"""
 window { background: #f6f7f4; color: #24372d; }
+.recovery-dialog, .recovery-dialog box { background: #f6f7f4; color: #24372d; }
+.recovery-dialog label { color: #24372d; }
+.recovery-dialog label.muted { color: #67766d; }
 headerbar { background: #ffffff; }
 .page { padding: 22px; }
 .hero { font-size: 26px; font-weight: 700; }
@@ -75,7 +78,7 @@ class Panel(Gtk.Application):
             app_id += ".p" + hashlib.sha256(str(root).encode()).hexdigest()[:16]
         # DEFAULT_FLAGS was named FLAGS_NONE before GLib 2.74; both mean no flags.
         super().__init__(application_id=app_id,
-                         flags=getattr(Gio.ApplicationFlags, "DEFAULT_FLAGS", Gio.ApplicationFlags.FLAGS_NONE))
+                         flags=getattr(Gio.ApplicationFlags, "DEFAULT_FLAGS", Gio.ApplicationFlags.FLAGS_NONE) | Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
         self.client, self.root = client, root
         self.window = None
         self.state = None
@@ -97,6 +100,13 @@ class Panel(Gtk.Application):
         self.pending_valid = False
         self.pending_refresh_timer = 0
         self.connect("activate", self.activate_panel)
+        self.connect("command-line", self.command_line)
+
+    def command_line(self, _app, command):
+        self.activate()
+        if '--resolve' in command.get_arguments():
+            self.problems.show()
+        return 0
 
     def label(self, text="", style=None):
         widget = Gtk.Label(label=text, xalign=0)
@@ -136,6 +146,12 @@ class Panel(Gtk.Application):
         self.refresh_button = Gtk.Button(label="Refresh")
         self.refresh_button.connect("clicked", lambda _: self.refresh())
         header.pack_end(self.refresh_button)
+        self.resolve_button = Gtk.Button(label='Resolve sync problems…')
+        self.resolve_button.set_no_show_all(True)
+        self.resolve_button.connect('clicked', lambda _: self.problems.show())
+        header.pack_end(self.resolve_button)
+        from ananas_problems import Problems
+        self.problems = Problems(self)
 
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         page.get_style_context().add_class("page")
@@ -214,6 +230,17 @@ class Panel(Gtk.Application):
         from ananas_nas_tree import NASTree
         self.nas_tree = NASTree(self)
         notebook.append_page(self.nas_tree, Gtk.Label(label="NAS files"))
+
+        settings = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin=18)
+        self.notify_problems = Gtk.CheckButton(label='Notify me about sync problems')
+        self.notification_loading = False
+        self.notification_saving = False
+        self.notify_problems.connect('toggled', self.change_notifications)
+        settings.pack_start(self.notify_problems, False, False, 0)
+        settings_note = self.label('Show a system notification when a new sync problem needs a decision.\nThe pineapple icon and Resolve sync problems menu stay available when notifications are off.', 'muted')
+        settings_note.set_line_wrap(True)
+        settings.pack_start(settings_note, False, False, 0)
+        notebook.append_page(settings, Gtk.Label(label='Settings'))
 
         self.pending_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=14)
         notebook.append_page(self.pending_page, Gtk.Label(label="Local changes"))
@@ -374,6 +401,13 @@ class Panel(Gtk.Application):
             self.pause.set_sensitive(False)
             return False
         self.state = state
+        self.resolve_button.set_visible(state.get('syncProblemsTotal', 0) > 0)
+        if not self.notification_saving:
+            self.notification_loading = True
+            self.notify_problems.set_active(state.get('notifySyncProblems', True))
+            self.notification_loading = False
+        if self.problems.dialog is not None:
+            self.problems.refresh()
         if not was_connected:
             self.message.set_text("")
         reason = state.get("syncReason", "Connected")
@@ -785,6 +819,27 @@ class Panel(Gtk.Application):
         print(f"Could not open {directory}: {error}", flush=True)
         self.message.set_text(f"The file manager could not open {directory.name}. Try again, or open {directory} directly in Files.")
 
+    def change_notifications(self, button):
+        if self.notification_loading or self.notification_saving:
+            return
+        value = button.get_active()
+        self.notification_saving = True
+        button.set_sensitive(False)
+        def done(_value, error):
+            self.notification_saving = False
+            button.set_sensitive(True)
+            if error:
+                self.message.set_text('Could not save notification settings. Please retry.')
+                self.notification_loading = True
+                button.set_active((self.state or {}).get('notifySyncProblems', True))
+                self.notification_loading = False
+            elif self.state is not None:
+                self.state['notifySyncProblems'] = value
+            return False
+        if not self.submit(lambda: self.client.set_problem_notifications(value), done):
+            self.notification_saving = False
+            button.set_sensitive(True)
 
-def run(client, root):
-    Panel(client, root).run([])
+
+def run(client, root, resolve=False):
+    Panel(client, root).run(['ananas-control-panel'] + (['--resolve'] if resolve else []))

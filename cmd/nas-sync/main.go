@@ -249,6 +249,31 @@ func runApplication(ctx context.Context, cfg *config.Config, once, identity bool
 	treeCtx, stopTree := context.WithCancel(ctx)
 	treeView := &nasTreeView{ctx: treeCtx, db: db, live: live, namespace: cfg.Sync.Namespace}
 	defer func() { stopTree(); treeView.wg.Wait() }()
+	treeControls := treeView.controls()
+	treeControls.Problems = func(ctx context.Context, after string) (any, error) { return db.IncomingProblems(ctx, after) }
+	treeControls.Resolve = func(ctx context.Context, request index.IncomingChoice) error {
+		if live == nil {
+			return fmt.Errorf("synchronization is disabled")
+		}
+		id, err := hash.RandomDigest()
+		if err != nil {
+			return err
+		}
+		if err := db.ChooseIncoming(request, id.Hex()); err != nil {
+			return err
+		}
+		live.worker.Notify()
+		return nil
+	}
+	treeControls.Notifications = func(ctx context.Context, enabled bool) error {
+		if err := db.SetNotifySyncProblems(enabled); err != nil {
+			return err
+		}
+		if live != nil {
+			live.worker.Notify()
+		}
+		return nil
+	}
 	statusServer, err := web.NewWithPending(cfg.WebPort, func() any {
 		status := observer.Status()
 		reason := "NAS transfers disabled: synchronization engine and safety validation are incomplete."
@@ -265,7 +290,13 @@ func runApplication(ctx context.Context, cfg *config.Config, once, identity bool
 		if activityErr != nil {
 			reason = "Local activity history error: " + activityErr.Error()
 		}
+		problems, _ := db.IncomingProblems(context.Background(), "")
 		return struct {
+			SyncProblems         int    `json:"syncProblems"`
+			SyncProblemSignature string `json:"syncProblemSignature"`
+			SyncProblemsTotal    int    `json:"syncProblemsTotal"`
+			NotifySyncProblems   bool   `json:"notifySyncProblems"`
+			RecoveryDirectory    string `json:"recoveryDirectory"`
 			observe.Status
 			Paused          bool                 `json:"paused"`
 			AutomaticWrites bool                 `json:"automaticWrites"`
@@ -279,7 +310,7 @@ func runApplication(ctx context.Context, cfg *config.Config, once, identity bool
 			NAS             config.NAS           `json:"nas"`
 			Limits          config.Limits        `json:"limits"`
 			Traffic         traffic.Summary      `json:"traffic"`
-		}{Status: status, Paused: controls.Paused(), AutomaticWrites: live != nil, SyncReason: reason, UploadBytes: uploaded, DownloadBytes: downloaded, Updated24Hours: activity.UpdatedLast24Hours, RecentUpdates: activity.Recent, ActivePath: activePath, CPULimitPercent: cpuPercent(governor), NAS: cfg.NAS, Limits: cfg.Limits, Traffic: trafficHistory.Summary(time.Now())}
+		}{SyncProblemSignature: problems.Signature, SyncProblems: problems.Attention, SyncProblemsTotal: problems.Total, NotifySyncProblems: db.NotifySyncProblems(cfg.Notifications.SyncProblems), RecoveryDirectory: filepath.Join(cfg.StateDir, "recovered"), Status: status, Paused: controls.Paused(), AutomaticWrites: live != nil, SyncReason: reason, UploadBytes: uploaded, DownloadBytes: downloaded, Updated24Hours: activity.UpdatedLast24Hours, RecentUpdates: activity.Recent, ActivePath: activePath, CPULimitPercent: cpuPercent(governor), NAS: cfg.NAS, Limits: cfg.Limits, Traffic: trafficHistory.Summary(time.Now())}
 	}, controls.SetPaused, storage.snapshot, func(ctx context.Context, after string) (any, error) {
 		return db.PendingSync(ctx, after, cfg.Sync.MaxFileBytes)
 	}, func(ctx context.Context, request index.SyncConfirmation) (index.ConfirmationResult, error) {
@@ -291,7 +322,7 @@ func runApplication(ctx context.Context, cfg *config.Config, once, identity bool
 			live.worker.RequestSync()
 		}
 		return result, err
-	}, treeView.controls())
+	}, treeControls)
 	if err != nil {
 		return fmt.Errorf("start local status UI: %w", err)
 	}
