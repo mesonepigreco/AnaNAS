@@ -50,7 +50,7 @@ def session_options(directory):
 
 
 def canonical_test_path(output):
-    paths = [line.removeprefix("ANANAS_TEST_DIR=") for line in output.splitlines() if line.startswith("ANANAS_TEST_DIR=")]
+    paths = [line[len("ANANAS_TEST_DIR="):] for line in output.splitlines() if line.startswith("ANANAS_TEST_DIR=")]
     if len(paths) != 1:
         raise ValueError("NAS did not return one canonical disposable directory")
     path = Path(paths[0])

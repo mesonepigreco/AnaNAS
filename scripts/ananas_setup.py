@@ -45,6 +45,8 @@ def command_error(program, diagnostic, code):
         return "Could not contact SSH on this QNAP. Check its IP address and enable SSH in QTS, then retry."
     if program == 'ssh':
         return "The QNAP connection ended before this step completed. Reconnect to the NAS and try again."
+    if program == 'pkexec' and code == 126:
+        return "The PC administrator password request was cancelled or could not be shown. Retry the setup and enter your PC password in the dialog that appears."
     if program == 'pkexec':
         return "PC administrator approval was cancelled or system setup failed. No existing sync instance was replaced."
     return f"{program} could not complete this setup step. Check its installation and the NAS connection, then retry."
@@ -67,10 +69,29 @@ def run(argv, *, data=None, timeout=30, env=None):
     except FileNotFoundError:
         raise SetupError(f"Required program is missing: {Path(argv[0]).name}. Run the installer again.") from None
     if result.returncode:
-        raise SetupError(command_error(Path(argv[0]).name, result.stderr[:65536].decode(errors='replace'), result.returncode))
+        diagnostic = result.stderr[:65536].decode(errors='replace')
+        error = SetupError(command_error(Path(argv[0]).name, diagnostic, result.returncode))
+        error.dismissed = result.returncode == 126 and 'dismissed' in diagnostic.lower()
+        raise error
     if len(result.stdout) > 16 * 1024 * 1024:
         raise SetupError("The device returned an unexpectedly large response.")
     return result.stdout
+
+
+def install_system(system_plan):
+    """Run the PC system step as root. GNOME Shell sometimes dismisses the
+    password dialog before showing it ("Failed to show modal dialog"), which
+    pkexec reports at once as exit 126; ask again, but never re-run a failure of
+    the step itself or a request the person dismissed after reading it."""
+    argv = ["pkexec", "/usr/bin/python3", str(bundle_home() / "ananas_setup_system.py"), "--install"]
+    for attempt in range(3):
+        started = time.monotonic()
+        try:
+            return run(argv, data=json.dumps(system_plan).encode(), timeout=180)
+        except SetupError as error:
+            if attempt == 2 or not getattr(error, "dismissed", False) or time.monotonic() - started > 3:
+                raise
+        time.sleep(2)
 
 
 def private_write(path, data, mode=0o600):
@@ -344,17 +365,30 @@ class Session:
         private_write(askpass, ("#!/usr/bin/python3\nfrom pathlib import Path\n"
                                f"print(Path({str(secret)!r}).read_text(), end='')\n").encode(), 0o700)
         env = dict(os.environ, SSH_ASKPASS=str(askpass), SSH_ASKPASS_REQUIRE="force", DISPLAY=os.environ.get("DISPLAY", ":0"))
+        argv = ["ssh", "-F", "/dev/null", "-M", "-S", str(self.directory / "control"),
+                "-o", "ControlPersist=600", "-o", "StrictHostKeyChecking=yes",
+                "-o", f"UserKnownHostsFile={self.directory / 'hostkey'}",
+                "-o", "NumberOfPasswordPrompts=1", "-o", "ConnectTimeout=8",
+                "-o", "PreferredAuthentications=password,keyboard-interactive",
+                "-o", "PubkeyAuthentication=no", "-o", "ClearAllForwardings=yes",
+                "-o", "ForwardAgent=no", "-o", f"BindInterface={self.route['interface']}",
+                "-b", self.route["source"], "-fN", f"{self.username}@{self.host}"]
         try:
-            run(["ssh", "-F", "/dev/null", "-M", "-S", str(self.directory / "control"),
-                 "-o", "ControlPersist=600", "-o", "StrictHostKeyChecking=yes",
-                 "-o", f"UserKnownHostsFile={self.directory / 'hostkey'}",
-                 "-o", "NumberOfPasswordPrompts=1", "-o", "ConnectTimeout=8",
-                 "-o", "PreferredAuthentications=password,keyboard-interactive",
-                 "-o", "PubkeyAuthentication=no", "-o", "ClearAllForwardings=yes",
-                 "-o", "ForwardAgent=no", "-o", f"BindInterface={self.route['interface']}",
-                 "-b", self.route["source"], "-fN", f"{self.username}@{self.host}"], env=env)
-        except SetupError:
-            raise
+            # OpenSSH before 8.4 ignores SSH_ASKPASS_REQUIRE and prompts on the
+            # controlling terminal; a new session has none, so askpass is used.
+            # Before 8.5 the backgrounded master also keeps its inherited
+            # stdout/stderr, so a pipe would never reach EOF: use a file.
+            with tempfile.TemporaryFile(dir=self.directory) as diagnostic:
+                try:
+                    result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                            stderr=diagnostic, env=env, timeout=30, start_new_session=True)
+                except subprocess.TimeoutExpired:
+                    raise SetupError("The operation timed out. Check the LAN connection and try again.") from None
+                except FileNotFoundError:
+                    raise SetupError("Required program is missing: ssh. Run the installer again.") from None
+                if result.returncode:
+                    diagnostic.seek(0)
+                    raise SetupError(command_error("ssh", diagnostic.read(65536).decode(errors="replace"), result.returncode))
         finally:
             secret.unlink(missing_ok=True)
             askpass.unlink(missing_ok=True)
@@ -553,6 +587,9 @@ def make_plan(session, inventory, share, folder, local, account, *, relative='')
     web_used = {p.get("webPort") for p in profiles()}
     web = next(value for value in range(8721, 8821) if value not in web_used)
     profile = config_home() / "profiles" / key
+    # An attempt that stopped before changing the NAS is simply started again.
+    if profile.exists() and staged_attempt(profile):
+        discard_attempt(profile)
     if profile.exists():
         raise SetupError("A previous setup attempt exists for this folder. Its saved recovery record must be inspected before retrying.")
     return {"id": key, "host": session.host, "route": session.route, "share": share["name"],
@@ -593,7 +630,7 @@ def read_helper(session, managed):
         raise SetupError("The installed anaNAS helper configuration could not be read. It has not been changed.") from None
     service = session.command("head -c 65536 " + q(base + "/service.sh"), admin=True)
     rules = firewall_rules(service, config.get("peers", []))
-    if not rules:
+    if not rules and not firewall_admits(service, session.route["source"]):
         raise SetupError("The installed helper's startup script does not grant its PC a recognizable firewall rule, "
                          "so this PC cannot be added automatically. It has not been changed.")
     saved = {}
@@ -622,6 +659,22 @@ def firewall_rules(service, peers):
             rules.append({"indent": match.group(1), "text": match.group(2), "chain": match.group(3),
                           "peer": peer, "end": match.end()})
     return rules
+
+
+def firewall_admits(service, source):
+    """True when every chain the startup script fills already accepts source,
+    for example through a rule for the whole direct subnet."""
+    address = ipaddress.IPv4Address(source)
+    chains = {}
+    for match in re.finditer(r"^[ \t]*/sbin/iptables -A ([A-Za-z0-9_-]{1,28}) ([^\n]*)-j ACCEPT[ \t]*$", service, re.M):
+        admitted = False
+        for network in re.findall(r"(?:^|\s)-[sd] ([0-9./]+)(?=\s)", match.group(2)):
+            try:
+                admitted = admitted or address in ipaddress.IPv4Network(network, strict=False)
+            except ValueError:
+                pass
+        chains[match.group(1)] = chains.get(match.group(1), False) or admitted
+    return bool(chains) and all(chains.values())
 
 
 def join_certificates(directory, source):
@@ -738,21 +791,20 @@ def make_join_plan(session, inventory, share, local, managed, helper):
     local = validate_local(local)
     key = hashlib.sha256((session.host + "/" + root).encode()).hexdigest()[:16]
     profile = config_home() / "profiles" / key
-    # The helper's own peer list is checked above, so an attempt recorded as staged
-    # changed nothing on the NAS and can simply be replaced. A later phase means the
-    # NAS was touched, and that record is for a person to read before retrying.
-    if profile.exists() and staged_attempt(profile):
-        shutil.rmtree(profile)
-    if profile.exists():
-        raise SetupError("A previous setup attempt for this folder reached the NAS. Inspect its saved recovery record at "
-                         + str(profile / "setup.json") + " before retrying.")
-    release_state(key)
+    # An unfinished attempt from this PC is resumed rather than refused: join
+    # replaces its local leftovers, and `repair` rebuilds the helper's files from
+    # the originals saved on the NAS before that attempt changed them.
+    resume = profile.exists() and incomplete_attempt(profile)
+    if profile.exists() and not resume:
+        raise SetupError("This folder is already set up on this PC. Open its control panel instead.")
+    if not resume:
+        release_state(key)
     if any(p.get("sync", {}).get("port") == port and p.get("nas", {}).get("host") == session.host for p in profiles()):
         raise SetupError("This PC already has a profile for that helper. Open its control panel instead.")
     web_used = {p.get("webPort") for p in profiles()}
     web = next(value for value in range(8721, 8821) if value not in web_used)
     return {"id": key, "host": session.host, "route": session.route, "share": share["name"],
-            "nasRoot": root, "createFolder": False, "localRoot": str(local), "join": True, "repair": repair,
+            "nasRoot": root, "createFolder": False, "localRoot": str(local), "join": True, "repair": repair, "resume": resume,
             "base": managed["base"], "account": account, "port": port, "webPort": web,
             "namespace": namespace, "profile": str(profile), "mountPoint": "/mnt/ananas-" + key,
             "uid": os.getuid(), "gid": os.getgid(), "username": __import__('pwd').getpwuid(os.getuid()).pw_name}
@@ -811,6 +863,8 @@ def _join(session, inventory, plan, helper, progress):
     if locked and source in config.get("peers", []) and not plan.get("repair"):
         raise SetupError("This PC is already allowed by that helper. It has not been changed.")
     profile = Path(plan["profile"])
+    if plan.get("resume") and profile.exists():
+        discard_attempt(profile)
     profile.mkdir(mode=0o700, parents=True)
     record = profile / "setup.json"
     atomically(record, json.dumps({"phase": "staging", "plan": plan}, indent=2).encode())
@@ -887,9 +941,8 @@ def _join(session, inventory, plan, helper, progress):
         remote(session, "checking the updated helper configuration", check, admin=True)
     atomically(record, json.dumps({"phase": "nas-updated", "plan": plan}, indent=2).encode())
     progress("Preparing saved-credential mounting and PC autostart (administrator confirmation)…")
-    system_plan = dict(plan, password=session.password, nasUsername=session.username)
-    run(["pkexec", "/usr/bin/python3", str(bundle_home() / "ananas_setup_system.py"), "--install"],
-        data=json.dumps(system_plan).encode(), timeout=180)
+    system_plan = dict(plan, password=session.password, nasUsername=session.username, pin=server_pin)
+    install_system(system_plan)
     atomically(record, json.dumps({"phase": "pc-prepared", "plan": plan}, indent=2).encode())
     progress("Allowing this PC through the NAS firewall and restarting the helper…")
     # Each chain the script already uses gains one rule for this PC, mirroring the
@@ -901,7 +954,7 @@ def _join(session, inventory, plan, helper, progress):
     # PC's current address; a subnet rule that already exists covers this PC.
     grant = source if locked else str(ipaddress.IPv4Network(config["prefix"]))
     rules, added = firewall_rules(service, list(config.get("peers", [])) + ([] if locked else [grant])), []
-    covered = any(rule["peer"] == grant for rule in rules)
+    covered = firewall_admits(service, source) or any(rule["peer"] == grant for rule in rules)
     if covered:
         rules = []
     for rule in sorted(rules, key=lambda item: item["end"], reverse=True):
@@ -1091,8 +1144,7 @@ esac
     atomically(config_path, json.dumps(config, indent=2).encode())
     progress("Preparing saved-credential mounting and PC autostart (administrator confirmation)…")
     system_plan = dict(plan, password=session.password, nasUsername=session.username, pin=pins["server"])
-    run(["pkexec", "/usr/bin/python3", str(bundle_home() / "ananas_setup_system.py"), "--install"],
-        data=json.dumps(system_plan).encode(), timeout=180)
+    install_system(system_plan)
     atomically(record, json.dumps({"phase": "pc-prepared", "plan": plan}, indent=2).encode())
     for key, value in {"Name": "anaNAS-" + plan["id"], "Display_Name": "anaNAS " + plan["share"], "Version": "0.2.0",
                        "Enable": "TRUE", "Shell": base + "/service.sh", "Install_Path": base, "Author": "anaNAS", "Desktop": "0"}.items():

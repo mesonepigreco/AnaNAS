@@ -16,6 +16,21 @@ import tempfile
 import ananas_setup as setup
 
 
+def desktop_quote(path):
+    return '"' + str(path).replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`").replace("$", "\\$") + '"'
+
+
+def link_command(link, target):
+    """Point link at target, replacing an older link but never a real file."""
+    if link.exists() and not link.is_symlink():
+        print(f"Kept existing {link}; it is not an anaNAS link.", flush=True)
+        return
+    staged = link.with_name(link.name + ".setup-new")
+    staged.unlink(missing_ok=True)
+    staged.symlink_to(target)
+    os.replace(staged, link)
+
+
 def install_files():
     if os.getuid() == 0:
         raise setup.SetupError("Run this installer as your desktop user, not as root. It requests administrator approval only when needed.")
@@ -64,6 +79,11 @@ def install_files():
     shutil.copy2(repo / "scripts/nas_sync_indicator.py", bin_dir / "nas-sync-indicator")
     # Importable module needed by both the native panel and setup verification.
     shutil.copy2(repo / "scripts/nas_sync_indicator.py", bin_dir / "nas_sync_indicator.py")
+    # Source checkouts do not preserve the executable bit; the desktop launcher
+    # runs these directly, and desktop menus hide entries they cannot execute.
+    for name in ("nas-sync-indicator", "ananas_setup_gui.py", "ananas_control_panel.py"):
+        (bin_dir / name).chmod(0o755)
+    link_command(bin_dir / "ananas", "nas-sync-indicator")
     services = Path.home() / ".config/systemd/user"
     services.mkdir(parents=True, exist_ok=True)
     service = services / "nas-sync-indicator.service"
@@ -77,9 +97,11 @@ def install_files():
         icons.mkdir(parents=True, exist_ok=True)
         for icon in ("ananas.svg", "ananas-symbolic.svg", "ananas-broken.svg"):
             shutil.copy2(repo / "internal/web/assets" / icon, icons / icon)
-    main_desktop = applications / "ananas.desktop"
-    if not main_desktop.exists():
-        setup.private_write(main_desktop, (repo / "deploy/ananas.desktop").read_bytes(), 0o644)
+    # Rewritten on every install so an entry from an older installer is repaired.
+    # An absolute Exec does not depend on ~/.local/bin being on the session PATH.
+    launcher = (repo / "deploy/ananas.desktop").read_text().replace(
+        "Exec=nas-sync-indicator ", "Exec=" + desktop_quote(bin_dir / "ananas") + " ")
+    setup.atomically(applications / "ananas.desktop", launcher.encode())
     desktop = applications / "ananas-setup.desktop"
     setup.atomically(desktop, ("[Desktop Entry]\nType=Application\nName=anaNAS Setup\n"
                      "Comment=Connect your QNAP and choose folders to sync\nExec=/usr/bin/python3 " +

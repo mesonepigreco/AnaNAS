@@ -123,7 +123,7 @@ def parse_mount(mountinfo):
         raise ValueError("Ambiguous Nasdir mount")
     fields, fs = matches[0]
     options, super_options = set(fields[5].split(",")), set(fs[2].split(","))
-    server, _, share = fs[1].removeprefix("//").partition("/")
+    server, _, share = (fs[1][2:] if fs[1].startswith("//") else fs[1]).partition("/")
     try:
         in_prefix = fs[1].startswith("//") and ipaddress.IPv4Address(server) in ipaddress.IPv4Network(PREFIX)
     except ValueError:
