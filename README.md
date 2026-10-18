@@ -58,7 +58,8 @@ are reported; the installer does not silently download or install dependencies.
 
 The installer builds the PC daemon and ARM64, ARMv7 and x86-64 NAS helpers, installs
 application files under `~/.local`, and enables the desktop indicator. Existing
-running daemons and configurations are preserved.
+running daemons and configurations are preserved; an open control panel is closed
+so the next one starts with the updated code.
 
 Open **Set up QNAP / Manage sync folders** from the pineapple menu:
 

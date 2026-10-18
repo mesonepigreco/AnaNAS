@@ -10,6 +10,7 @@ import getpass
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import tempfile
 
@@ -29,6 +30,27 @@ def link_command(link, target):
     staged.unlink(missing_ok=True)
     staged.symlink_to(target)
     os.replace(staged, link)
+
+
+def close_control_panels(indicator):
+    """Close control panels started from the previous installation. A click
+    is forwarded to the panel already running, which an older version may not
+    understand, so the window would never appear until it was closed."""
+    closed = 0
+    for entry in Path("/proc").iterdir():
+        try:
+            if not entry.name.isdigit() or entry.stat().st_uid != os.getuid():
+                continue
+            argv = (entry / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue  # The process exited or is not readable.
+        if os.fsencode(indicator) in argv and b"--control-panel" in argv:
+            try:
+                os.kill(int(entry.name), signal.SIGTERM)
+                closed += 1
+            except ProcessLookupError:
+                pass
+    return closed
 
 
 def install_files():
@@ -110,6 +132,8 @@ def install_files():
     setup.run(["systemctl", "--user", "enable", "nas-sync-indicator.service"])
     # Restart so an already running panel item reloads the updated module/icons.
     setup.run(["systemctl", "--user", "restart", "nas-sync-indicator.service"])
+    if close_control_panels(bin_dir / "nas-sync-indicator"):
+        print("Closed the open control panel; open it again from the anaNAS menu.", flush=True)
     print("Installed. Existing sync profiles and running daemons were preserved.", flush=True)
 
 
