@@ -120,7 +120,7 @@ def mounted_host(plan, mountinfo):
         if left.split()[4] == target:
             fs = right.split()
             decoded = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fs[1])
-            server, _, share = decoded.removeprefix("//").partition("/")
+            server, _, share = (decoded[2:] if decoded.startswith("//") else decoded).partition("/")
             try:
                 in_prefix = decoded.startswith("//") and ipaddress.IPv4Address(server) in ipaddress.IPv4Network(plan["route"]["prefix"])
             except ValueError:
@@ -155,6 +155,26 @@ def mount(plan):
              f"credentials={credential},vers=3.1.1,seal,cache=strict,serverino,actimeo=1,uid={plan['uid']},gid={plan['gid']},file_mode=0600,dir_mode=0700,nosuid,nodev,noexec"], timeout=35)
 
 
+def remove_previous(plan, paths, unit, timer):
+    """Undo an earlier, unfinished attempt for this same instance so a retry
+    can install it again. Every path is named by the instance ID."""
+    key = plan["id"]
+    for name in (timer.name, unit.name):
+        subprocess.run(["systemctl", "disable", "--now", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+    target = Path(plan["mountPoint"])
+    if target.is_symlink() or (target.exists() and not target.is_dir()):
+        raise ValueError("unexpected file at the mount point")
+    if mounted_host(plan, Path("/proc/self/mountinfo").read_text()):
+        execute(["umount", "-l", str(target)])
+    subprocess.run(["nft", "delete", "table", "inet", "ananas_" + key], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for path in [*paths, unit, timer]:
+        if path.is_symlink() or path.exists():
+            path.unlink()
+    if target.exists():
+        target.rmdir()  # Refuses a non-empty directory rather than deleting content.
+    execute(["systemctl", "daemon-reload"])
+
+
 def install(plan):
     validate(plan)
     for name in ("nasUsername", "password"):
@@ -172,7 +192,7 @@ def install(plan):
     unit = Path("/etc/systemd/system") / (name + ".service")
     timer = unit.with_suffix(".timer")
     if any(path.exists() for path in [*paths, unit, timer, Path(plan["mountPoint"])]):
-        raise ValueError("this installation already has staged system files; inspect them before retrying")
+        remove_previous(plan, paths, unit, timer)
     execute(["nft", "--version"])
     execute(["mount.cifs", "-V"])
     # The NAS may move within the direct subnet (DHCP); only the host with the

@@ -197,14 +197,63 @@ class SetupTests(unittest.TestCase):
         with patch.object(setup, 'lan', return_value=route):
             session = setup.Session(route['host'], 'admin', 'fake-test-secret')
             try:
-                with patch.object(setup, 'run', side_effect=setup.SetupError('failed')) as command:
-                    with self.assertRaises(setup.SetupError):
+                with patch.object(setup.subprocess, 'run', return_value=Mock(returncode=255)) as command:
+                    with self.assertRaisesRegex(setup.SetupError, 'connection ended'):
                         session.connect()
                     self.assertNotIn('fake-test-secret', repr(command.call_args))
                 self.assertFalse((session.directory / 'password').exists())
                 self.assertFalse((session.directory / 'askpass').exists())
             finally:
                 session.close()
+
+    def test_administrator_request_is_repeated_only_when_dismissed_unseen(self):
+        def failure(code, diagnostic):
+            with patch.object(subprocess, 'run', return_value=Mock(returncode=code, stdout=b'', stderr=diagnostic)):
+                try:
+                    setup.run(['pkexec'])
+                except setup.SetupError as error:
+                    return error
+        dismissed = failure(126, b'Error executing command as another user: Request dismissed')
+        self.assertIn('could not be shown', str(dismissed))
+        with patch.object(setup.time, 'sleep'):
+            with patch.object(setup, 'run', side_effect=[dismissed, b'']) as command:
+                setup.install_system({'id': 'x'})
+                self.assertEqual(command.call_count, 2)
+            with patch.object(setup, 'run', side_effect=[dismissed] * 5) as command:
+                with self.assertRaises(setup.SetupError):
+                    setup.install_system({'id': 'x'})
+                self.assertEqual(command.call_count, 3)
+            with patch.object(setup, 'run', side_effect=[failure(1, b'failed'), b'']) as command:
+                with self.assertRaisesRegex(setup.SetupError, 'system setup failed'):
+                    setup.install_system({'id': 'x'})
+                self.assertEqual(command.call_count, 1)
+
+    def test_login_uses_askpass_once_and_returns_while_master_persists(self):
+        # Simulates OpenSSH 8.2: the password is read from the controlling
+        # terminal when one exists, and the backgrounded master keeps stderr.
+        route = dict(host='10.23.42.30', source='10.23.42.17', interface='enp1s0', prefix='10.23.42.0/24')
+        with tempfile.TemporaryDirectory() as directory:
+            fake = Path(directory) / 'ssh'
+            log = Path(directory) / 'log'
+            fake.write_text('#!/bin/sh\n'
+                            f'if (: < /dev/tty) 2>/dev/null; then echo tty >> {log}; exit 255; fi\n'
+                            f'"$SSH_ASKPASS" >> {log}\n'
+                            'sleep 30 &\nexit 0\n')
+            fake.chmod(0o700)
+            with patch.object(setup, 'lan', return_value=route), \
+                    patch.dict(os.environ, PATH=directory + os.pathsep + os.environ['PATH']):
+                session = setup.Session(route['host'], 'admin', 'fake-test-secret')
+                try:
+                    with patch.object(session, 'command', return_value='0\n'), \
+                            patch.object(setup, 'config_home', return_value=Path(directory) / 'config'):
+                        (session.directory / 'hostkey').write_text('')
+                        started = setup.time.monotonic()
+                        session.connect()
+                        self.assertLess(setup.time.monotonic() - started, 10)
+                    self.assertEqual(log.read_text(), 'fake-test-secret')
+                finally:
+                    session.connected = False
+                    session.close()
 
     def test_complete_new_instance_transaction_with_simulated_nas_and_system(self):
         """Real private files/certificates; no production writes or fake live claim."""
@@ -382,6 +431,8 @@ class SetupTests(unittest.TestCase):
                 result = setup.join(session, inventory, plan, read, lambda message: None)
                 self.assertIn(str(home / 'files'), result['message'])
                 self.assertEqual(len(privileged), 1)
+                # The root step must accept what join sends it, including the pin.
+                system.validate(privileged[0])
                 nas = json.loads(payloads[base + '/helper.json'])
                 pc = json.loads((Path(plan['profile']) / 'config.json').read_bytes())
                 # The installed helper keeps its identity, root and first PC.
@@ -494,6 +545,8 @@ class SetupTests(unittest.TestCase):
                     payloads[names[1]] = payloads[names[0]]
             if 'mv' in tokens and not command.startswith('command -v'):
                 payloads[tokens[tokens.index('mv') + 2].rstrip(';')] = payloads.pop(tokens[tokens.index('mv') + 1])
+            if command.startswith('rm -f ') and len(tokens) == 3:
+                payloads.pop(tokens[2], None)
             if command.startswith('sha256sum '):
                 return hashlib.sha256(payloads[tokens[1]]).hexdigest() + '  ' + tokens[1]
             if command.startswith('head -c'):
@@ -570,7 +623,7 @@ class SetupTests(unittest.TestCase):
                 self.assertEqual(json.loads(environment['payloads'][base + '/helper.json'])['peers'], ['10.23.42.9'])
                 self.assertTrue(any(c.endswith(' status') for c in environment['calls']))
 
-    def test_a_staged_attempt_is_replaced_so_a_retry_can_proceed(self):
+    def test_an_unfinished_attempt_is_resumed_by_adding_the_pc_again(self):
         route = dict(host='10.23.42.30', source='10.23.42.17', interface='enp1s0', prefix='10.23.42.0/24')
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
@@ -582,11 +635,43 @@ class SetupTests(unittest.TestCase):
                 profile = next((home / '.config/nas-sync/profiles').iterdir())
                 self.assertEqual(json.loads((profile / 'setup.json').read_bytes())['phase'], 'nas-updating')
                 self.assertFalse(setup.staged_attempt(profile))
-                # A record past staging is for a person to read, not to overwrite.
-                with self.assertRaisesRegex(setup.SetupError, 'reached the NAS'):
-                    self.run_join(home, environment, folder='other')
-                setup.atomically(profile / 'setup.json', json.dumps({'phase': 'staging', 'plan': {}}).encode())
-                self.assertTrue(setup.staged_attempt(profile))
+                # Adding the PC again resumes it: no separate discard step.
+                environment['state']['fail'] = None
+                plan, result = self.run_join(home, environment)
+                self.assertTrue(plan['resume'])
+                self.assertEqual(json.loads((profile / 'setup.json').read_bytes())['phase'], 'started')
+                nas = json.loads(environment['payloads'][environment['base'] + '/helper.json'])
+                self.assertEqual(nas['peers'], ['10.23.42.9', '10.23.42.17'])
+                self.assertEqual(len(nas['clients']), 2)
+                # A finished setup is not resumed or duplicated.
+                with self.assertRaisesRegex(setup.SetupError, 'already'):
+                    self.run_join(home, environment)
+
+    def test_join_keeps_a_subnet_firewall_and_ignores_stale_backups(self):
+        """The deployed helper admits the whole subnet and has backups from an old trial."""
+        route = dict(host='10.23.42.30', source='10.23.42.17', interface='enp1s0', prefix='10.23.42.0/24')
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            with patch.object(Path, 'home', return_value=home), patch.object(setup, 'config_home', return_value=home / '.config/nas-sync'), \
+                    patch.object(setup, 'lan', return_value=route), patch.object(setup.time, 'sleep'):
+                environment = self.join_environment(home, route, fail=lambda c: c.endswith(' stop || true'))
+                base, payloads = environment['base'], environment['payloads']
+                subnet = environment['helper']['service'].replace('10.23.42.9', '10.23.42.0/24')
+                self.assertNotEqual(subnet, environment['helper']['service'])
+                payloads[base + '/service.sh'] = subnet.encode()
+                payloads[base + '/service.sh.before-enroll'] = b'#!/bin/sh\n# stale trial script\n'
+                with self.assertRaises(setup.SetupError):
+                    self.run_join(home, environment)
+                self.assertEqual(json.loads(payloads[base + '/helper.json'])['peers'], ['10.23.42.9', '10.23.42.17'])
+                environment['state']['fail'] = None
+                plan, result = self.run_join(home, environment)
+                self.assertTrue(plan['repair'])
+                self.assertEqual(payloads[base + '/service.sh'], subnet.encode())
+                self.assertFalse(any('iptables -I' in c for c in environment['calls']))
+                nas = json.loads(payloads[base + '/helper.json'])
+                self.assertEqual(nas['peers'], ['10.23.42.9', '10.23.42.17'])
+                self.assertEqual(len(nas['clients']), 2)
+                self.assertNotIn(base + '/helper.json.before-enroll', payloads)
 
     def test_an_interrupted_attempt_is_repaired_from_the_saved_originals(self):
         """An attempt that wrote helper.json and then failed must be cleanly redoable."""

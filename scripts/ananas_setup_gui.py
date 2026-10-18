@@ -15,8 +15,8 @@ import ananas_setup as backend
 class Wizard(Gtk.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title="anaNAS — Set up synchronization")
-        self.set_default_size(850, 650)
-        self.set_border_width(22)
+        self.set_default_size(850, 560)
+        self.set_border_width(16)
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self.session = None
         self.inventory = None
@@ -27,7 +27,7 @@ class Wizard(Gtk.ApplicationWindow):
         self.identity_timer = 0
         self.identity_future = None
         self.connect("delete-event", self.close_requested)
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         self.add(outer)
         title = Gtk.Label(xalign=0)
         title.set_markup('<span size="x-large" weight="bold">Choose QNAP folders to sync</span>')
@@ -38,11 +38,17 @@ class Wizard(Gtk.ApplicationWindow):
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
         self.stack.set_vhomogeneous(False)
         self.stack.connect('notify::visible-child-name', self.page_changed)
-        outer.pack_start(self.stack, True, True, 0)
-        self.status = Gtk.Label(xalign=0, wrap=True, selectable=True)
-        outer.pack_start(self.status, False, False, 0)
+        # Pages scroll inside the window so it fits small screens, while the
+        # status line below stays visible to report progress and errors.
+        pages = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
+        pages.add(self.stack)
+        outer.pack_start(pages, True, True, 0)
+        footer = Gtk.Box(spacing=10)
         self.spinner = Gtk.Spinner()
-        outer.pack_start(self.spinner, False, False, 0)
+        footer.pack_start(self.spinner, False, False, 0)
+        self.status = Gtk.Label(xalign=0, wrap=True, selectable=True)
+        footer.pack_start(self.status, True, True, 0)
+        outer.pack_start(footer, False, False, 0)
         self.login_page()
         self.existing_page()
         self.show_all()
@@ -398,8 +404,8 @@ class Wizard(Gtk.ApplicationWindow):
     def destination_page(self, share, relative, path, new_name=''):
         self.chosen_share, self.chosen_relative = share, relative
         self.existing_profile = backend.local_profile(self.session.host, path, self.inventory['shares']) if not new_name else None
-        # An unfinished attempt is not a working configuration: it must be discardable
-        # rather than offered as one, or this folder cannot be set up at all.
+        # An unfinished attempt is not a working configuration: setting the folder
+        # up again resumes it rather than offering it as one.
         self.unfinished_profile = None
         if self.existing_profile and backend.incomplete_attempt(self.existing_profile):
             self.unfinished_profile, self.existing_profile = self.existing_profile, None
@@ -434,10 +440,7 @@ class Wizard(Gtk.ApplicationWindow):
                     ("Add this PC to this synchronized folder" if self.chosen_managed else "Review and start sync"), self.review)
         self.button(box, "Back to shared folders", lambda _: self.stack.set_visible_child_name("folders"))
         if self.unfinished_profile:
-            self.label(box, 'An earlier attempt to set up this folder on this PC did not finish, so it is not synchronizing. '
-                            'Discard it to try again. This removes only the unfinished local setup: the NAS folder, its helper '
-                            'and any files already in the local folder are left alone.')
-            self.button(box, 'Discard the unfinished attempt', self.discard)
+            self.label(box, 'An earlier attempt to set up this folder on this PC did not finish. Continuing resumes it.')
         if self.chosen_managed:
             self.label(box, 'This folder is already synchronized by a NAS helper for another PC. Continuing adds this PC to that same helper, '
                             'so both PCs synchronize the same directory through the NAS. The NAS folder and the other PC keep their contents and settings.\n'
@@ -499,21 +502,6 @@ class Wizard(Gtk.ApplicationWindow):
             self.work(lambda: backend.install(self.session, self.inventory, plan,
                       lambda message: GLib.idle_add(self.progress, message)), self.installed, "Preparing installation…")
 
-    def discard(self, _):
-        profile = self.unfinished_profile
-        dialog = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
-                                   buttons=Gtk.ButtonsType.OK_CANCEL, text="Discard the unfinished setup for this folder?")
-        dialog.format_secondary_text("Its saved settings and certificates are removed from this PC so the folder can be set up again.\n"
-                                     "The NAS, its helper and the contents of " + profile['local']['root'] + " are not changed.")
-        accepted = dialog.run() == Gtk.ResponseType.OK
-        dialog.destroy()
-        if accepted:
-            self.work(lambda: backend.discard_attempt(profile), self.discarded, "Discarding the unfinished setup…")
-
-    def discarded(self, _):
-        self.status.set_text("The unfinished setup was discarded. Choose the folder again to set it up.")
-        self.work(lambda: self.session.inventory(), self.folders_page, "Reading shared folders…")
-
     def prepare_join(self, managed, local):
         """Read the installed helper and validate before anything is changed."""
         helper = backend.read_helper(self.session, managed)
@@ -555,7 +543,12 @@ class Wizard(Gtk.ApplicationWindow):
             self.identity_timer = 0
         if self.session:
             self.session.close()
-        self.executor.shutdown(wait=False, cancel_futures=True)
+        try:
+            self.executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:  # Python 3.8 (Ubuntu 20.04) has no cancel_futures.
+            if self.identity_future:
+                self.identity_future.cancel()
+            self.executor.shutdown(wait=False)
         return False
 
 
