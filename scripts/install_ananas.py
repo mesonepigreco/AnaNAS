@@ -80,8 +80,8 @@ def install_files():
             if arch:
                 env.update(GOOS="linux", GOARCH=arch, GOARM="7")
             subprocess.run(["go", "build", "-trimpath", "-o", str(target), "./cmd/" + command], cwd=repo, env=env, check=True)
-        # Keep a binary backup on upgrade. Replacing the file does not restart an
-        # already running daemon or touch its configuration/index.
+        # Keep a binary backup on upgrade. Replacing the file does not touch a
+        # daemon's configuration/index; running daemons restart at the end.
         installed = bin_dir / "nas-sync"
         if installed.exists():
             backup = installed.with_name("nas-sync.before-setup")
@@ -132,9 +132,24 @@ def install_files():
     setup.run(["systemctl", "--user", "enable", "nas-sync-indicator.service"])
     # Restart so an already running panel item reloads the updated module/icons.
     setup.run(["systemctl", "--user", "restart", "nas-sync-indicator.service"])
+    try:
+        if setup.system_upgrade_needed():
+            print("Updating the PC mount service of existing sync folders (administrator confirmation)…", flush=True)
+            setup.upgrade_system()
+    except setup.SetupError as error:
+        # The rest of the update is installed; the next run asks again.
+        print("The PC mount service was not updated: " + str(error) + " Run the installer again to retry.", flush=True)
+    # Running sync daemons switch to the new binary and re-check the mount the
+    # system step may just have repaired; stopped ones stay stopped.
+    try:
+        daemons = [profile["_service"] for profile in setup.profiles()]
+        if daemons:
+            setup.run(["systemctl", "--user", "try-restart", *daemons], timeout=120)
+    except setup.SetupError as error:
+        print("Running sync folders were not restarted: " + str(error), flush=True)
     if close_control_panels(bin_dir / "nas-sync-indicator"):
         print("Closed the open control panel; open it again from the anaNAS menu.", flush=True)
-    print("Installed. Existing sync profiles and running daemons were preserved.", flush=True)
+    print("Installed. Existing sync profiles were preserved and running sync folders restarted.", flush=True)
 
 
 def terminal():

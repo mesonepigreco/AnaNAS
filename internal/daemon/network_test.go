@@ -135,7 +135,7 @@ func TestNetworkSessionsPreserveObserverAndControls(t *testing.T) {
 	controls, displayed := make(chan struct{}, 1), make(chan struct{}, 8)
 	done := make(chan error, 1)
 	go func() {
-		done <- RunWithNetwork(ctx, o, controls, w, Surface{Notify: func() { displayed <- struct{}{} }}, r, NetworkOptions{n, func(context.Context) error { checks.Add(1); return nil }})
+		done <- RunWithNetwork(ctx, o, controls, w, Surface{Notify: func() { displayed <- struct{}{} }}, r, NetworkOptions{Monitor: n, Check: func(context.Context) error { checks.Add(1); return nil }})
 	}()
 	await(t, o.started)
 	await(t, n.started)
@@ -179,6 +179,48 @@ func TestNetworkSessionsPreserveObserverAndControls(t *testing.T) {
 	await(t, r.stopped)
 }
 
+func TestNetworkDeniedPolicyRetriesWhenTheMountAppears(t *testing.T) {
+	// The root mount service attaches the share without any network event; a
+	// daemon waiting only for the network stayed offline until restarted.
+	o, w, r, n := sessionFixtures()
+	var allowed atomic.Bool
+	mounted := make(chan struct{})
+	offline := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- RunWithNetwork(ctx, o, nil, w, Surface{Network: func(s NetworkStatus) {
+			if s.Phase == "offline" {
+				offline <- struct{}{}
+			}
+		}}, r, NetworkOptions{Monitor: n, Check: func(context.Context) error {
+			if !allowed.Load() {
+				return errors.New("NAS mount: expected NAS share is not mounted")
+			}
+			return nil
+		}, Recheck: func(ctx context.Context) error {
+			select {
+			case <-mounted:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}})
+	}()
+	await(t, o.started)
+	await(t, offline)
+	sessionQuiet(t, w.started, 20*time.Millisecond)
+	allowed.Store(true)
+	close(mounted)
+	sessionAwait(t, w.started)
+	sessionAwait(t, r.started)
+	sessionFinish(t, done, cancel)
+	await(t, o.stopped)
+	await(t, w.stopped)
+	await(t, r.stopped)
+}
+
 func TestNetworkDeniedPolicyHasNoRetryAndKeepsObservation(t *testing.T) {
 	o, w, r, n := sessionFixtures()
 	var allowed atomic.Bool
@@ -192,7 +234,7 @@ func TestNetworkDeniedPolicyHasNoRetryAndKeepsObservation(t *testing.T) {
 			if s.Phase == "offline" {
 				offline <- struct{}{}
 			}
-		}}, r, NetworkOptions{n, func(context.Context) error {
+		}}, r, NetworkOptions{Monitor: n, Check: func(context.Context) error {
 			checks.Add(1)
 			if !allowed.Load() {
 				return errors.New("no direct LAN")
@@ -223,7 +265,7 @@ func TestNetworkRecoveryJoinsBeforeRestart(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- RunWithNetwork(ctx, o, nil, w, Surface{}, r, NetworkOptions{n, func(context.Context) error { return nil }})
+		done <- RunWithNetwork(ctx, o, nil, w, Surface{}, r, NetworkOptions{Monitor: n, Check: func(context.Context) error { return nil }})
 	}()
 	await(t, w.started)
 	await(t, r.started)
@@ -254,7 +296,7 @@ func TestNetworkPendingSubscriptionAndRetryCancellation(t *testing.T) {
 					if s.Phase == "retrying" {
 						retrying <- struct{}{}
 					}
-				}}, r, NetworkOptions{n, func(context.Context) error { t.Error("unexpected policy check"); return nil }})
+				}}, r, NetworkOptions{Monitor: n, Check: func(context.Context) error { t.Error("unexpected policy check"); return nil }})
 			}()
 			await(t, o.started)
 			await(t, n.started)
@@ -272,7 +314,7 @@ func TestNetworkPendingSubscriptionAndRetryCancellation(t *testing.T) {
 func TestNetworkWorkerFailureRemainsFatal(t *testing.T) {
 	o, w, r, n := sessionFixtures()
 	w.fail = errors.New("local storage failed")
-	err := RunWithNetwork(context.Background(), o, nil, w, Surface{}, r, NetworkOptions{n, func(context.Context) error { return nil }})
+	err := RunWithNetwork(context.Background(), o, nil, w, Surface{}, r, NetworkOptions{Monitor: n, Check: func(context.Context) error { return nil }})
 	if !errors.Is(err, w.fail) {
 		t.Fatal(err)
 	}

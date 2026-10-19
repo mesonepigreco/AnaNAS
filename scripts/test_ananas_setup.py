@@ -247,7 +247,7 @@ class SetupTests(unittest.TestCase):
                     return error
         dismissed = failure(126, b'Error executing command as another user: Request dismissed')
         self.assertIn('could not be shown', str(dismissed))
-        with patch.object(setup.time, 'sleep'):
+        with patch.object(setup.time, 'sleep'), patch.object(setup, 'record_system_version'):
             with patch.object(setup, 'run', side_effect=[dismissed, b'']) as command:
                 setup.install_system({'id': 'x'})
                 self.assertEqual(command.call_count, 2)
@@ -259,6 +259,82 @@ class SetupTests(unittest.TestCase):
                 with self.assertRaisesRegex(setup.SetupError, 'system setup failed'):
                     setup.install_system({'id': 'x'})
                 self.assertEqual(command.call_count, 1)
+
+    def test_update_reapplies_root_mount_helper_installed_by_older_version(self):
+        """A fixed mount gate must reach PCs set up earlier: their root-owned
+        copy was never refreshed, so a DHCP renumbering kept sync offline."""
+        with tempfile.TemporaryDirectory() as temporary:
+            home, units = Path(temporary) / 'bundle', Path(temporary) / 'units'
+            home.mkdir()
+            units.mkdir()
+            (home / 'ananas_setup_system.py').write_bytes(b'new version')
+            key = 'a' * 16
+            profile = {'_config': str(Path(temporary) / 'profiles' / key / 'config.json')}
+            instances = setup.system_instances
+            with patch.object(setup, 'bundle_home', return_value=home), \
+                    patch.object(setup, 'profiles', return_value=[profile]), \
+                    patch.object(setup, 'system_instances', lambda: instances(units)):
+                self.assertFalse(setup.system_upgrade_needed())  # No root mount service yet.
+                (units / f'ananas-mount-{key}.service').write_text('')
+                self.assertTrue(setup.system_upgrade_needed())  # Installed before versions were recorded.
+                with patch.object(setup, 'run', return_value=b'') as command:
+                    setup.upgrade_system()
+                self.assertEqual(command.call_args.args[0][-1], '--upgrade')
+                self.assertFalse(setup.system_upgrade_needed())
+                (home / 'ananas_setup_system.py').write_bytes(b'newer version')
+                self.assertTrue(setup.system_upgrade_needed())
+                with patch.object(setup, 'run', side_effect=setup.SetupError('cancelled')):
+                    with self.assertRaises(setup.SetupError):
+                        setup.upgrade_system()
+                self.assertTrue(setup.system_upgrade_needed())  # Asked again next time.
+
+    def test_root_helper_files_follow_the_subnet_not_the_old_pc_address(self):
+        key = 'b' * 16
+        plan = dict(id=key, uid=1000, port=8742, route=dict(host='10.23.42.30', source='10.23.42.17', prefix='10.23.42.0/24', interface='enp1s0'))
+        paths, unit, timer = system.instance_paths(key)
+        files = system.generated_files(plan, paths, unit, timer)
+        self.assertEqual(set(files), {paths[2], paths[3], unit, timer})
+        self.assertNotIn(paths[1], files)  # The credential is never rewritten.
+        self.assertEqual(files[paths[2]], (Path(system.__file__).read_bytes(), 0o700))
+        rules = files[paths[3]][0].decode()
+        self.assertIn('ip daddr 10.23.42.0/24', rules)
+        self.assertNotIn('10.23.42.17', rules)
+        self.assertIn(f'--mount {paths[0]}', files[unit][0].decode())
+
+    @unittest.skipUnless(shutil.which('unshare') and subprocess.run(['unshare', '-r', 'true']).returncode == 0, 'needs user namespaces')
+    def test_upgrade_migrates_a_plan_installed_before_certificate_pins(self):
+        """The first installed plans had no pin; the update must add the
+        fingerprint the sync profile trusts instead of refusing the plan."""
+        key, pin = 'c' * 16, 'd' * 64
+        with tempfile.TemporaryDirectory() as temporary:
+            base, units = Path(temporary) / 'etc', Path(temporary) / 'units'
+            base.mkdir(mode=0o700)
+            units.mkdir()
+            plan = dict(id=key, uid=os.getuid(), gid=os.getgid(), username=__import__('pwd').getpwuid(os.getuid()).pw_name,
+                        host='10.23.42.30', port=8742, share='Public', mountPoint='/mnt/ananas-' + key,
+                        route=dict(host='10.23.42.30', source='10.23.42.17', prefix='10.23.42.0/24', interface='enp1s0'))
+            system.private_new(base / (key + '.json'), json.dumps(plan).encode())
+            system.private_new(base / (key + '.cred'), b'secret')
+            (units / f'ananas-mount-{key}.service').write_text('old')
+            script = (f'import json, sys; sys.path.insert(0, {str(Path(system.__file__).parent)!r}); from pathlib import Path\n'
+                      'import ananas_setup_system as s\n'
+                      's.execute = lambda argv, timeout=30: print(" ".join(argv)) or b""\n'
+                      's.subprocess.run = lambda argv, **k: None\n'
+                      f's.upgrade({os.getuid()}, {{{key!r}: {pin!r}}}, Path({str(base)!r}), Path({str(units)!r}))\n')
+            commands = subprocess.run(['unshare', '-r', '/usr/bin/python3', '-c', script], check=True, capture_output=True, text=True).stdout
+            self.assertEqual(json.loads((base / (key + '.json')).read_bytes())['pin'], pin)
+            self.assertEqual((base / (key + '.cred')).read_bytes(), b'secret')
+            self.assertEqual((base / (key + '.py')).read_bytes(), Path(system.__file__).read_bytes())
+            self.assertTrue((units / f'ananas-mount-{key}.timer').is_file())
+            self.assertIn(f'systemctl restart --no-block ananas-mount-{key}.service', commands)
+            self.assertFalse(list(base.glob('*.update')))
+
+    def test_failed_mount_names_its_reason_without_secrets(self):
+        script = Path(system.__file__)
+        result = subprocess.run(['/usr/bin/python3', str(script), '--upgrade'], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        expected = 'run the update through pkexec' if os.geteuid() == 0 else 'administrator authentication required'
+        self.assertIn('(' + expected + ')', result.stderr)
 
     def test_login_uses_askpass_once_and_returns_while_master_persists(self):
         # Simulates OpenSSH 8.2: the password is read from the controlling

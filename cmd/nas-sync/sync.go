@@ -148,7 +148,7 @@ func openSync(cfg *config.Config, state string, db *index.DB, observer *observe.
 	if err != nil {
 		return nil, err
 	}
-	s.network = daemon.NetworkOptions{Monitor: netwatch.Monitor{Interface: cfg.NAS.Interface}, Check: gate}
+	s.network = daemon.NetworkOptions{Monitor: netwatch.Monitor{Interface: cfg.NAS.Interface}, Check: gate, Recheck: netwatch.WaitMountChange}
 	s.inventory, err = s.client.NewInventoryReader()
 	if err != nil {
 		return nil, err

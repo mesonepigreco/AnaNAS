@@ -175,26 +175,16 @@ def remove_previous(plan, paths, unit, timer):
     execute(["systemctl", "daemon-reload"])
 
 
-def install(plan):
-    validate(plan)
-    for name in ("nasUsername", "password"):
-        if not isinstance(plan[name], str) or not plan[name] or any(c in plan[name] for c in "\n\r\0"):
-            raise ValueError("invalid SMB credential")
-    direct_lan(plan, plan["host"])
+def instance_paths(key, base=Path("/etc/ananas-setup"), units=Path("/etc/systemd/system")):
+    unit = units / ("ananas-mount-" + key + ".service")
+    return [base / (key + suffix) for suffix in (".json", ".cred", ".py", ".nft")], unit, unit.with_suffix(".timer")
+
+
+def generated_files(plan, paths, unit, timer):
+    """Every root-owned file derived from the plan and this script, except the
+    credential and the plan itself, as {path: (content, mode)}. An update
+    rewrites exactly these, so fixes reach instances installed earlier."""
     key = plan["id"]
-    base = Path("/etc/ananas-setup")
-    base.mkdir(mode=0o700, exist_ok=True)
-    info = base.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o700:
-        raise ValueError("private root-owned setup directory required")
-    name = "ananas-mount-" + key
-    paths = [base / (key + suffix) for suffix in (".json", ".cred", ".py", ".nft")]
-    unit = Path("/etc/systemd/system") / (name + ".service")
-    timer = unit.with_suffix(".timer")
-    if any(path.exists() for path in [*paths, unit, timer, Path(plan["mountPoint"])]):
-        remove_previous(plan, paths, unit, timer)
-    execute(["nft", "--version"])
-    execute(["mount.cifs", "-V"])
     # The NAS may move within the direct subnet (DHCP); only the host with the
     # pinned certificate is used, and traffic must stay on the physical LAN.
     subnet = plan["route"]["prefix"]
@@ -208,13 +198,6 @@ def install(plan):
  }}
 }}
 '''
-    private_new(paths[3], rules.encode())
-    execute(["nft", "--check", "-f", str(paths[3])])
-    credential = f"username={plan.pop('nasUsername')}\npassword={plan.pop('password')}\n".encode()
-    private_new(paths[1], credential)
-    private_new(paths[0], json.dumps(plan).encode())
-    private_new(paths[2], Path(__file__).read_bytes(), 0o700)
-    Path(plan["mountPoint"]).mkdir(mode=0o700)
     # Each boot loads the dedicated rules once, then the bounded failed mount
     # retries until this LAN is available. A NAS address change emits no PC
     # event, so a timer re-runs the check (one TLS handshake when unchanged).
@@ -233,8 +216,11 @@ UMask=0077
 [Install]
 WantedBy=multi-user.target
 '''
-    private_new(unit, service.encode(), 0o644)
-    private_new(timer, f"""[Unit]
+    return {
+        paths[3]: (rules.encode(), 0o600),
+        paths[2]: (Path(__file__).read_bytes(), 0o700),
+        unit: (service.encode(), 0o644),
+        timer: (f"""[Unit]
 Description=Re-check anaNAS LAN mount {key} for a moved NAS
 [Timer]
 OnBootSec=2min
@@ -242,7 +228,92 @@ OnUnitInactiveSec=2min
 AccuracySec=30s
 [Install]
 WantedBy=timers.target
-""".encode(), 0o644)
+""".encode(), 0o644),
+    }
+
+
+def replace_private(path, data, mode):
+    staged = path.with_name(path.name + ".update")
+    staged.unlink(missing_ok=True)
+    private_new(staged, data, mode)
+    return staged
+
+
+def upgrade(uid, pins, base=Path("/etc/ananas-setup"), units=Path("/etc/systemd/system")):
+    """Rewrite the generated files of the caller's existing instances with this
+    version and restart their mounts. Credentials are kept. Plans written before
+    the mount followed the NAS by certificate lack its pin; the caller supplies
+    the server fingerprint its sync profile already trusts."""
+    if not base.is_dir():
+        return
+    info = base.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o700:
+        raise ValueError("private root-owned setup directory required")
+    for source in sorted(base.glob("*.json")):
+        info = source.lstat()
+        if info.st_uid != 0 or not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+            raise ValueError("private system configuration required")
+        plan = json.loads(source.read_bytes())
+        if plan.get("uid") != uid:
+            continue  # Another PC account's instance; its owner updates it.
+        if "pin" not in plan and isinstance(pins.get(plan.get("id")), str):
+            plan["pin"] = pins[plan["id"]]
+            validate(plan)
+            os.replace(replace_private(source, json.dumps(plan).encode(), 0o600), source)
+        validate(plan)
+        paths, unit, timer = instance_paths(plan["id"], base, units)
+        if source != paths[0] or not unit.is_file():
+            raise ValueError("unexpected file in the setup directory")
+        changed = set()
+        for path, (data, mode) in generated_files(plan, paths, unit, timer).items():
+            if path.is_file() and not path.is_symlink() and path.read_bytes() == data and stat.S_IMODE(path.lstat().st_mode) == mode:
+                continue
+            staged = replace_private(path, data, mode)
+            if path == paths[3]:
+                execute(["nft", "--check", "-f", str(staged)])
+            os.replace(staged, path)
+            changed.add(path)
+        if not changed:
+            continue
+        if paths[3] in changed:
+            subprocess.run(["nft", "delete", "table", "inet", "ananas_" + plan["id"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            execute(["nft", "-f", str(paths[3])])
+        execute(["systemctl", "daemon-reload"])
+        execute(["systemctl", "reset-failed", unit.name])
+        # --no-block: an unreachable NAS must not fail the update; the service
+        # and timer keep retrying with the new version.
+        execute(["systemctl", "restart", "--no-block", unit.name])
+        execute(["systemctl", "enable", "--now", timer.name])
+
+
+def install(plan):
+    validate(plan)
+    for name in ("nasUsername", "password"):
+        if not isinstance(plan[name], str) or not plan[name] or any(c in plan[name] for c in "\n\r\0"):
+            raise ValueError("invalid SMB credential")
+    direct_lan(plan, plan["host"])
+    key = plan["id"]
+    base = Path("/etc/ananas-setup")
+    base.mkdir(mode=0o700, exist_ok=True)
+    info = base.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o700:
+        raise ValueError("private root-owned setup directory required")
+    name = "ananas-mount-" + key
+    paths, unit, timer = instance_paths(key)
+    if any(path.exists() for path in [*paths, unit, timer, Path(plan["mountPoint"])]):
+        remove_previous(plan, paths, unit, timer)
+    execute(["nft", "--version"])
+    execute(["mount.cifs", "-V"])
+    files = generated_files(plan, paths, unit, timer)
+    private_new(paths[3], files[paths[3]][0])
+    execute(["nft", "--check", "-f", str(paths[3])])
+    credential = f"username={plan.pop('nasUsername')}\npassword={plan.pop('password')}\n".encode()
+    private_new(paths[1], credential)
+    private_new(paths[0], json.dumps(plan).encode())
+    private_new(paths[2], *files[paths[2]])
+    Path(plan["mountPoint"]).mkdir(mode=0o700)
+    private_new(unit, *files[unit])
+    private_new(timer, *files[timer])
     execute(["systemctl", "daemon-reload"])
     execute(["systemctl", "enable", "--now", name + ".service"], timeout=60)
     execute(["systemctl", "enable", "--now", name + ".timer"])
@@ -254,10 +325,18 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--install", action="store_true")
     mode.add_argument("--mount", type=Path)
+    mode.add_argument("--upgrade", action="store_true")
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise ValueError("administrator authentication required")
-    if args.install:
+    if args.upgrade:
+        if "PKEXEC_UID" not in os.environ:
+            raise ValueError("run the update through pkexec as the PC account")
+        raw = sys.stdin.buffer.read(65537)
+        if len(raw) > 65536:
+            raise ValueError("update request is too large")
+        upgrade(int(os.environ["PKEXEC_UID"]), json.loads(raw).get("pins", {}) if raw.strip() else {})
+    elif args.install:
         raw = sys.stdin.buffer.read(65537)
         if len(raw) > 65536:
             raise ValueError("setup request is too large")
@@ -276,7 +355,15 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
+    except Exception as error:
         # Deliberately omit subprocess output/JSON, which can include passwords.
-        print("anaNAS setup: system preparation failed. Check the LAN, required packages and existing instance files; no existing sync configuration was replaced.", file=sys.stderr)
+        # ValueError messages are fixed text written in this file, and a failed
+        # command is named only by its program and exit status.
+        if isinstance(error, ValueError) and not isinstance(error, json.JSONDecodeError):
+            reason = str(error)
+        elif isinstance(error, subprocess.CalledProcessError):
+            reason = f"{Path(error.cmd[0]).name} exited with status {error.returncode}"
+        else:
+            reason = type(error).__name__
+        print(f"anaNAS setup: system preparation failed ({reason}). Check the LAN, required packages and existing instance files; no existing sync configuration was replaced.", file=sys.stderr)
         raise SystemExit(1)

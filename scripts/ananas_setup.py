@@ -48,6 +48,10 @@ def command_error(program, diagnostic, code):
     if program == 'pkexec' and code == 126:
         return "The PC administrator password request was cancelled or could not be shown. Retry the setup and enter your PC password in the dialog that appears."
     if program == 'pkexec':
+        # The system step names its failure with fixed text it wrote itself.
+        reason = re.search(r"system preparation failed \(([a-zA-Z0-9 _.,:/-]{1,120})\)", diagnostic)
+        if reason:
+            return f"PC system setup failed: {reason[1]}. No existing sync instance was replaced."
         return "PC administrator approval was cancelled or system setup failed. No existing sync instance was replaced."
     return f"{program} could not complete this setup step. Check its installation and the NAS connection, then retry."
 
@@ -84,14 +88,64 @@ def install_system(system_plan):
     pkexec reports at once as exit 126; ask again, but never re-run a failure of
     the step itself or a request the person dismissed after reading it."""
     argv = ["pkexec", "/usr/bin/python3", str(bundle_home() / "ananas_setup_system.py"), "--install"]
+    result = run_privileged(argv, json.dumps(system_plan).encode())
+    record_system_version()
+    return result
+
+
+def run_privileged(argv, data=None):
     for attempt in range(3):
         started = time.monotonic()
         try:
-            return run(argv, data=json.dumps(system_plan).encode(), timeout=180)
+            return run(argv, data=data, timeout=180)
         except SetupError as error:
             if attempt == 2 or not getattr(error, "dismissed", False) or time.monotonic() - started > 3:
                 raise
         time.sleep(2)
+
+
+def system_version_record():
+    return bundle_home() / "system-version.sha256"
+
+
+def system_version():
+    return hashlib.sha256((bundle_home() / "ananas_setup_system.py").read_bytes()).hexdigest()
+
+
+def record_system_version():
+    try:
+        version = system_version()
+    except FileNotFoundError:
+        return  # No bundled copy was installed, so none was applied.
+    atomically(system_version_record(), (version + "\n").encode())
+
+
+def system_instances(units=Path("/etc/systemd/system")):
+    """IDs of this account's profiles that have a root mount service."""
+    return [Path(profile["_config"]).parent.name for profile in profiles()
+            if (units / f"ananas-mount-{Path(profile['_config']).parent.name}.service").is_file()]
+
+
+def system_upgrade_needed():
+    """True when root-owned mount helpers were installed by another version.
+    Their files are unreadable here, so the version last applied is recorded."""
+    try:
+        recorded = system_version_record().read_text().strip()
+    except FileNotFoundError:
+        recorded = ""
+    return recorded != system_version() and bool(system_instances())
+
+
+def upgrade_system():
+    """Apply this version's root mount helper to existing instances. Without
+    it, fixes to the mount gate never reach PCs set up earlier."""
+    instances = system_instances()
+    pins = {Path(profile["_config"]).parent.name: profile.get("sync", {}).get("serverFingerprint")
+            for profile in profiles()}
+    pins = {key: pin for key, pin in pins.items() if key in instances and isinstance(pin, str)}
+    run_privileged(["pkexec", "/usr/bin/python3", str(bundle_home() / "ananas_setup_system.py"), "--upgrade"],
+                   json.dumps({"pins": pins}).encode())
+    record_system_version()
 
 
 def private_write(path, data, mode=0o600):

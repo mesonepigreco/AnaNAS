@@ -13,9 +13,14 @@ type Network interface {
 
 // Check performs local-only LAN validation, without DNS, NAS probes or root
 // traversal. Per-operation gates are still mandatory.
+//
+// Recheck, when set, blocks until local state the check reads changes (such as
+// the mount table) and returns nil; a denied session then retries at once
+// instead of waiting for a network event that may never come.
 type NetworkOptions struct {
 	Monitor Network
 	Check   func(context.Context) error
+	Recheck func(context.Context) error
 }
 
 type NetworkStatus struct {
@@ -154,7 +159,24 @@ func (w *networkWorker) attempt(ctx context.Context) (error, bool) {
 	}
 	if err := w.options.Check(session); err != nil {
 		w.status("offline", err)
-		<-session.Done() // no retry/probe timer while local policy denies access
+		// No retry/probe timer while local policy denies access: only a network
+		// or local state change (Recheck) starts the next attempt.
+		changed, pending := make(chan error, 1), w.options.Recheck != nil
+		if pending {
+			go func() { changed <- w.options.Recheck(session) }()
+		}
+		select {
+		case <-session.Done():
+		case recheckErr := <-changed:
+			pending = false
+			if recheckErr == nil {
+				return err, false
+			}
+			<-session.Done()
+		}
+		if pending {
+			<-changed // Joined before the session's descriptors are reused.
+		}
 		return networkResult()
 	}
 	if session.Err() != nil {
