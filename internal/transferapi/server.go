@@ -149,6 +149,11 @@ func fail(w http.ResponseWriter, status int, err error) {
 	}{err.Error()})
 }
 
+// BusyMessage marks the reply to a request that arrived while another client
+// (usually another PC sharing this helper) held the single operation slot.
+// Deployed helpers send this exact text, so clients recognise it by it.
+const BusyMessage = "transfer owner busy"
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.lifecycle.Lock()
 	if s.stopping {
@@ -184,7 +189,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case s.active <- struct{}{}:
 		defer func() { <-s.active }()
 	default:
-		fail(w, http.StatusServiceUnavailable, fmt.Errorf("transfer owner busy; retry within the operation's budget"))
+		fail(w, http.StatusServiceUnavailable, fmt.Errorf("%s; retry within the operation's budget", BusyMessage))
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), transferTimeout(s.opts.MaxBatchBytes, s.opts.ReadBytesPerSecond))

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"strings"
 	"sync"
 
 	"nas-sync/internal/config"
@@ -212,6 +213,10 @@ func statusReason(network daemon.NetworkStatus, observation observe.Status, work
 		return "Indexing local changes; synchronization will resume automatically"
 	}
 	if work.LastError != "" {
+		if work.Phase == "retrying" && strings.Contains(work.LastError, transferapi.BusyMessage) {
+			// Normal turn-taking: the NAS serves one transfer at a time.
+			return "Waiting for another PC to finish its transfer with the NAS; synchronization continues automatically"
+		}
 		if work.Phase == "retrying" {
 			return "Temporary synchronization problem; retrying automatically: " + work.LastError
 		}

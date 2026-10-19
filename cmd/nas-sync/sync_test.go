@@ -25,6 +25,7 @@ func TestStatusReasonDistinguishesObservationProgressFromFailures(t *testing.T) 
 		{"worker failure", active, observe.Status{Ready: true}, replica.WorkerStatus{Phase: "attention", LastError: "publication cache budget exhausted"}, "Synchronization needs attention: publication cache budget exhausted"},
 		{"isolated failures", active, observe.Status{Ready: true}, replica.WorkerStatus{Phase: "partial", LastError: "unsupported name"}, "Eligible files synced; some paths need attention: unsupported name"},
 		{"worker retry", active, observe.Status{Ready: true}, replica.WorkerStatus{Phase: "retrying", LastError: "connection reset"}, "Temporary synchronization problem; retrying automatically: connection reset"},
+		{"another PC's transfer", active, observe.Status{Ready: true}, replica.WorkerStatus{Phase: "retrying", LastError: `local file "a/.git/objects/47": NAS protocol status 503: transfer owner busy; retry within the operation's budget`}, "Waiting for another PC to finish its transfer with the NAS; synchronization continues automatically"},
 		{"working", active, observe.Status{Ready: true}, replica.WorkerStatus{Phase: "working"}, "Synchronizing"},
 		{"idle", active, observe.Status{Ready: true}, replica.WorkerStatus{Phase: "idle"}, "LAN sync active"},
 	}
