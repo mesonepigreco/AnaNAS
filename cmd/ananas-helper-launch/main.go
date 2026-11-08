@@ -106,6 +106,48 @@ func run(o launchOptions) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	return supervise(ctx, o, func() error { return launch(ctx, o) }, waitRetry)
+}
+
+// QNAP starts the launcher once at boot; there is no service manager to restart
+// it after a child failure or a transient route/bind error. Keep the privileged
+// parent alive, joining each child before retrying with the same LAN policy.
+// Disposable and explicitly time-limited invocations must still terminate.
+func supervise(ctx context.Context, o launchOptions, attempt func() error, wait func(context.Context, time.Duration) bool) error {
+	delay := time.Second
+	for ctx.Err() == nil {
+		started := time.Now()
+		err := attempt()
+		if ctx.Err() != nil {
+			return nil
+		}
+		if o.write || o.lifetime > 0 {
+			return err
+		}
+		if time.Since(started) >= time.Minute {
+			delay = time.Second
+		}
+		fmt.Fprintf(os.Stderr, "anaNAS launcher: helper stopped (%v); retrying in %s\n", err, delay)
+		if !wait(ctx, delay) {
+			return nil
+		}
+		delay = min(2*delay, time.Minute)
+	}
+	return nil
+}
+
+func waitRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func launch(ctx context.Context, o launchOptions) error {
 	port, current := helper.CurrentAddressPort(o.listen)
 	if !current {
 		return serve(ctx, o, o.listen, nil)
