@@ -50,6 +50,15 @@ type Observer struct {
 	events     atomic.Uint64
 	nextIO     time.Time
 	task       func() func()
+	// beforeOpen and beforeRead let tests remove a directory mid-scan.
+	beforeOpen func(string)
+	beforeRead func(string)
+}
+
+// vanished reports a directory removed or replaced after it was examined. The
+// parent's watch reports that change, so the next batch reconciles the index.
+func vanished(p string, err error) bool {
+	return p != "." && (errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR))
 }
 
 func New(cfg *config.Config, db *index.DB) (*Observer, error) {
@@ -356,6 +365,9 @@ func (o *Observer) scanBatch(ctx context.Context, paths []string, force bool) er
 			return nil
 		}
 		// Remove stale watches below a renamed/deleted path during reconciliation.
+		if o.beforeOpen != nil {
+			o.beforeOpen(p)
+		}
 		oldWatch, watched := o.watched[p]
 		if watched && (oldWatch.Device != uint64(st.Dev) || oldWatch.Inode != st.Ino) {
 			_ = o.watcher.Remove(filepath.Join(o.cfg.Local.Root, p))
@@ -367,6 +379,9 @@ func (o *Observer) scanBatch(ctx context.Context, paths []string, force bool) er
 				return fmt.Errorf("watch limit reached (%d)", o.cfg.Limits.MaxWatches)
 			}
 			if err := o.watcher.Add(filepath.Join(o.cfg.Local.Root, p)); err != nil {
+				if vanished(p, err) {
+					return nil
+				}
 				return err
 			}
 			o.watched[p] = index.Fingerprint{Device: uint64(st.Dev), Inode: st.Ino}
@@ -374,9 +389,15 @@ func (o *Observer) scanBatch(ctx context.Context, paths []string, force bool) er
 		}
 		f, err := o.root.Open(p)
 		if err != nil {
+			if vanished(p, err) {
+				return nil
+			}
 			return err
 		}
 		defer f.Close()
+		if o.beforeRead != nil {
+			o.beforeRead(p)
+		}
 		for {
 			if err := o.pace(ctx); err != nil {
 				return err
@@ -398,6 +419,9 @@ func (o *Observer) scanBatch(ctx context.Context, paths []string, force bool) er
 				return nil
 			}
 			if readErr != nil {
+				if vanished(p, readErr) {
+					return nil
+				}
 				return readErr
 			}
 		}

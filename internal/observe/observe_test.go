@@ -323,3 +323,52 @@ func TestReconfirmedAbsenceRefreshesMissingGeneration(t *testing.T) {
 		before = after
 	}
 }
+
+// A directory deleted or replaced while a scan examines it (for example a
+// solver's scratch directory) must not stop observation.
+func TestDirectoryVanishingDuringScanIsNotFatal(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		replace bool
+		install func(*Observer, func(string))
+	}{
+		{"before open", false, func(o *Observer, f func(string)) { o.beforeOpen = f }},
+		{"before read", false, func(o *Observer, f func(string)) { o.beforeRead = f }},
+		{"replaced by file before read", true, func(o *Observer, f func(string)) { o.beforeRead = f }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, db := setup(t)
+			dir := filepath.Join(cfg.Local.Root, "run", "scratch")
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			write(t, filepath.Join(dir, "wfc1.dat"), "wave")
+			write(t, filepath.Join(cfg.Local.Root, "run", "out"), "result")
+			snapshot(t, cfg, db)
+			o, err := New(cfg, db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.install(o, func(p string) {
+				if p != "run/scratch" {
+					return
+				}
+				if err := os.RemoveAll(dir); err != nil {
+					t.Error(err)
+				}
+				if tc.replace {
+					write(t, dir, "file")
+				}
+			})
+			if err := o.ScanOnce(context.Background()); err != nil {
+				t.Fatalf("scan failed: %v", err)
+			}
+			if r, ok, err := db.Get("run/scratch/wfc1.dat"); err != nil || !ok || !r.Missing {
+				t.Fatalf("removed child = %+v, %v, %v", r, ok, err)
+			}
+			if r, ok, err := db.Get("run/out"); err != nil || !ok || r.Missing {
+				t.Fatalf("sibling = %+v, %v, %v", r, ok, err)
+			}
+		})
+	}
+}

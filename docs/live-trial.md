@@ -107,6 +107,21 @@ panel (6) and indicator (18), plus the existing setup coverage. GTK visual check
 used synthetic conflicts; production recovery used the same authenticated API
 called by the dialog. An ARM64 helper build was also produced for deployment.
 
+On 2026-11-06 the production daemon exited seven times with
+`readdirent .../scratch/s.save: no such file or directory`: Quantum ESPRESSO
+removed its scratch directories between the scanner's `Lstat` and its watch,
+open or directory read. The observer now treats a non-root directory that
+vanishes or becomes a non-directory at those steps like one already absent at
+`Lstat`. Children not yet read are marked missing after the complete walk
+(an `rmdir` succeeds only on an empty directory), and the parent watch's event
+reconciles the directory itself. The NAS helper uses the same observer for its
+native root, so it was exposed to the same exit. On 2026-11-09 at 00:09 the
+helper briefly refused connections and was back within a minute. Without NAS
+logs, this race is the likely cause but is unconfirmed.
+`TestDirectoryVanishingDuringScanIsNotFatal` covers removal before the open,
+removal before the read, and replacement by a file. It reproduces the
+production error without the fix.
+
 See [reliability audit](reliability-audit.md) for the failure matrix and
 [README](../README.md#development-and-tests) for reproduction commands. Hardware
 tests and long soak tests need separate, explicitly configured environments.
