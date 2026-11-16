@@ -26,5 +26,5 @@ are anonymized templates, not an operational NAS configuration.
 
 Do not run historical fixed-profile maintenance scripts on a live share without
 adapting and inspecting their exact targets. Broader tree-deletion and conflict
-acceptance, history reclamation and complete reconciliation remain open.
+acceptance, NAS-side history reclamation and complete reconciliation remain open.
 Raw deployment evidence and recovery files are intentionally not distributed.

@@ -145,7 +145,14 @@ func openSync(cfg *config.Config, state string, db *index.DB, observer *observe.
 	if err != nil {
 		return nil, err
 	}
-	s.worker, err = replica.NewWorker(db, s.root, s.journal, s.store, s.publisher, s.client, replica.WorkerOptions{Namespace: cfg.Sync.Namespace, PushOptions: replica.PushOptions{Writes: true, Exclusions: exclusions, MaxFileBytes: cfg.Sync.MaxFileBytes, MaxBatchBytes: cfg.Sync.MaxBatchBytes, ReadBytesPerSecond: cfg.Limits.ReadBytesPerSecond, Gate: gate}, Ready: func() bool { v := observer.Status(); return v.Ready && !v.Scanning }, Task: task})
+	if pending, e := s.journal.CacheRemovalPending(); e != nil {
+		return nil, e
+	} else if pending {
+		if _, e := replica.MaintainCache(context.Background(), db, s.journal, cfg.Sync.Namespace, "", 4096, true); e != nil {
+			return nil, fmt.Errorf("recover cache maintenance: %w", e)
+		}
+	}
+	s.worker, err = replica.NewWorker(db, s.root, s.journal, s.store, s.publisher, s.client, replica.WorkerOptions{Namespace: cfg.Sync.Namespace, CacheMaintenance: true, PushOptions: replica.PushOptions{Writes: true, Exclusions: exclusions, MaxFileBytes: cfg.Sync.MaxFileBytes, MaxBatchBytes: cfg.Sync.MaxBatchBytes, ReadBytesPerSecond: cfg.Limits.ReadBytesPerSecond, Gate: gate}, Ready: func() bool { v := observer.Status(); return v.Ready && !v.Scanning }, Task: task})
 	if err != nil {
 		return nil, err
 	}

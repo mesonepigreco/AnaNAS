@@ -33,7 +33,8 @@ type WorkerRemote interface {
 }
 
 type WorkerOptions struct {
-	Namespace string
+	Namespace        string
+	CacheMaintenance bool
 	PushOptions
 	// Ready requires completed local observation. The gate still supplies actual
 	// LAN/egress authorization; Ready alone cannot authorize network access.
@@ -55,21 +56,23 @@ type WorkerStatus struct {
 // validated egress, retention and remote notification delivery. Deployed observation does
 // not instantiate it. Conflicts retain their durable work and stop the pass.
 type Worker struct {
-	db                 *index.DB
-	root               *content.Root
-	c                  *journal.Coordinator
-	store              *stage.Store
-	remote             WorkerRemote
-	opts               WorkerOptions
-	pusher             *Pusher
-	puller             *Puller
-	wake, changes      chan struct{}
-	running            atomic.Bool
-	priorityRequested  atomic.Bool
-	directoryRequested atomic.Bool
-	mu                 sync.Mutex
-	status             WorkerStatus
-	cancel             context.CancelFunc
+	db                   *index.DB
+	root                 *content.Root
+	c                    *journal.Coordinator
+	store                *stage.Store
+	remote               WorkerRemote
+	opts                 WorkerOptions
+	pusher               *Pusher
+	puller               *Puller
+	wake, changes        chan struct{}
+	running              atomic.Bool
+	priorityRequested    atomic.Bool
+	directoryRequested   atomic.Bool
+	mu                   sync.Mutex
+	status               WorkerStatus
+	cancel               context.CancelFunc
+	cacheCursor          string
+	nextCacheMaintenance time.Time
 }
 
 func NewWorker(db *index.DB, root *content.Root, c *journal.Coordinator, store *stage.Store, publisher journal.Publisher, remote WorkerRemote, o WorkerOptions) (*Worker, error) {
@@ -180,6 +183,12 @@ func (w *Worker) Run(ctx context.Context) error {
 	defer w.update(func(s *WorkerStatus) { s.Phase = "stopped" })
 	w.Notify()
 	var retry *time.Timer
+	var maintenanceC <-chan time.Time
+	if w.opts.CacheMaintenance {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		maintenanceC = ticker.C
+	}
 	retryDelay := 2 * time.Second
 	for {
 		var retryC <-chan time.Time
@@ -199,6 +208,9 @@ func (w *Worker) Run(ctx context.Context) error {
 			}
 		case <-retryC:
 			retry = nil
+		case <-maintenanceC:
+			_ = w.maintainCache(ctx)
+			continue
 		}
 		workCtx, cancel := context.WithCancel(ctx)
 		w.mu.Lock()
@@ -366,6 +378,9 @@ func (w *Worker) selectNextLocal(pass *workerPass) ([]string, bool, error) {
 }
 
 func (w *Worker) turn(ctx context.Context, pass *workerPass) (bool, error) {
+	if err := w.maintainCache(ctx); err != nil {
+		return false, err
+	}
 	// No other replica operation may interleave with unfinished local uploads.
 	if u, err := w.db.PendingUpload(); err != nil {
 		return false, err

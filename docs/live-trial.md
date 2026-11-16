@@ -128,10 +128,18 @@ tests and long soak tests need separate, explicitly configured environments.
 
 ## Outstanding acceptance
 
+The PC snapshot-maintenance change passed the full Go unit/race suites, vet,
+build and diff checks, including interrupted-removal recovery, conflict/inbox/
+outbox pins, delta reuse and deletion after reclamation. On an existing profile,
+an offline sweep removed only superseded unreferenced payloads; a second sweep
+found no remaining eligible snapshots. The updated daemon was installed and its
+running executable matched the verified build. This does not establish NAS-side
+history retention, current-base eviction, or sustained multi-PC cleanup acceptance.
+
 Fresh-NAS provisioning, NAS reboot, multi-folder production synchronization,
 interrupted-install recovery, broader firmware compatibility, power-loss recovery,
 broader directory-tree deletion and conflict-choice acceptance, never-observed head reconciliation
-and history reclamation remain incomplete. This application is not a backup
+and NAS-side history reclamation remain incomplete. This application is not a backup
 replacement.
 
 Keep private deployment settings, credentials, indexes and recovery evidence

@@ -111,6 +111,9 @@ func (c *Coordinator) ReserveUploadCache(p Proposal) error {
 }
 
 func unusedUpload(tx *bolt.Tx, p Proposal) error {
+	if tx.Bucket(metaBucket).Get(cachePendingKey) != nil {
+		return ErrPending
+	}
 	if tx.Bucket(metaBucket).Get([]byte("pending")) != nil || tx.Bucket(metaBucket).Get(intakeKey) != nil {
 		return ErrPending
 	}

@@ -240,6 +240,13 @@ func decode(raw []byte) (Record, error) {
 func clone(r Record) Record { r.Entries = append([]Entry(nil), r.Entries...); return r }
 
 func (c *Coordinator) check(tx *bolt.Tx, epoch uint64) error {
+	if tx.Bucket(metaBucket).Get(cachePendingKey) != nil {
+		return ErrPending
+	}
+	return c.checkEpoch(tx, epoch)
+}
+
+func (c *Coordinator) checkEpoch(tx *bolt.Tx, epoch uint64) error {
 	stored, err := number(tx.Bucket(metaBucket).Get([]byte("epoch")))
 	if err != nil {
 		return err

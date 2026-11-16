@@ -28,6 +28,14 @@ system; it does not claim sustained throughput or universal idle-resource result
   the synchronized root and are not automatically reclaimed; allow disk space for
   both retained NAS content and local copies. Large conflict queues and recovery
   trees still need sustained-load measurement.
+- PC snapshot maintenance reads bounded journal metadata and exact private names;
+  it does not scan or hash the synchronized tree or contact the NAS. Each batch
+  scans at most 4,096 versions and unlinks at most 128 superseded unpinned payloads.
+  Reference checks share publication's journal-then-index lock order. The worker
+  yields between batches and observes the existing CPU task hook. Receipts,
+  publication backups, unknown artifacts and current bases are not evicted.
+  The offline `ananas-cache` report/apply command runs full sweeps with both
+  database lifetime locks; see the README for use and limitations.
 
 ## Desktop and setup
 

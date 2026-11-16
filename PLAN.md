@@ -45,6 +45,10 @@ addresses, paths, machine identifiers or raw operational logs.
   copy and follow NAS, or keep the subtree separate. Native recovery dialog,
   broken pineapple indicator, conditional menu and optional desktop notifications;
   the notification checkbox persists per profile.
+- Bounded automatic PC-replica cleanup of superseded snapshot payloads, with
+  protected bases/conflicts/queues, durable removal recovery, payload-only budget
+  credit and an offline report/apply command. Current bases and NAS history remain
+  retained; this does not provide general snapshot eviction or metadata compaction.
 
 ## Verification scope
 
@@ -64,7 +68,8 @@ public repository. Public examples use fictitious values. See
 - Full directory-tree deletion and never-observed journal-head reconciliation.
 - Broader conflict-decision acceptance, selective-sync UI, per-file progress and
   rate/history UI.
-- Safe history/cache reclamation and broader recovery/fault acceptance.
+- NAS-side history reclamation, current-base eviction/rehydration, metadata
+  compaction and broader recovery/fault acceptance.
 - Ordinary-user onboarding, QTS share/account creation, and enrollment of another
   PC into an existing helper without replacing its namespace or trust settings.
 - Batch folder selection, graphical exclusions and resource customization.

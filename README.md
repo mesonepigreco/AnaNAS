@@ -226,6 +226,41 @@ logs or screenshots without removing credentials and personal paths.
 
 ## Development and tests
 
+### Local snapshot maintenance
+
+The PC daemon automatically removes superseded snapshot payloads that are no
+longer used by a current journal head, confirmed local base, conflict, buffered
+remote change, upload preparation/outbox, or interrupted publication/intake.
+It checks at most 4,096 version records and removes at most 128 snapshots per
+turn, yielding between turns. Completed sweeps wait fifteen minutes. This is
+local maintenance: it sends no NAS requests and never deletes synchronized files.
+
+For an immediate complete report or cleanup, stop the **selected profile's**
+daemon first, then build and run the offline tool:
+
+```sh
+GOCACHE=/tmp/nas-sync-go-cache GOMODCACHE=/tmp/nas-sync-go-mod-cache go build -o /tmp/ananas-cache ./cmd/ananas-cache
+/tmp/ananas-cache -config /path/to/profile.json          # report only
+/tmp/ananas-cache -config /path/to/profile.json -details # per-candidate JSON + summary
+/tmp/ananas-cache -config /path/to/profile.json -apply   # remove proven obsolete snapshots
+```
+
+Restart that profile afterward. The tool requires both database lifetime locks
+and an existing PC replica; it cannot clean a running profile or a NAS helper.
+Report mode opens the databases normally (including advancing the journal epoch),
+but removes no content. Interrupted removal is journaled and finished before the
+updated daemon resumes synchronization. Current bases, unbound legacy versions,
+unknown artifacts, publication/displaced backups, recovery copies and database
+history are retained. No age-based deletion or removal of the entire state
+directory is safe.
+
+This bounds obsolete payload accumulation, not all cache usage: current immutable
+bases still require local space for delta transfers/recovery. `limits.cacheBytes`
+remains a conservative admission budget, not a disk-usage target or LRU policy;
+existing persisted budgets cannot be decreased by editing the configuration.
+Maintenance credits only proven removed payload bytes, after durable removal,
+and retains the metadata allowances and history entry count.
+
 ```sh
 GOCACHE=/tmp/nas-sync-go-cache GOMODCACHE=/tmp/nas-sync-go-mod-cache go test ./...
 GOCACHE=/tmp/nas-sync-go-cache GOMODCACHE=/tmp/nas-sync-go-mod-cache go test -race ./...
@@ -250,7 +285,7 @@ The implementation includes regular-file synchronization, delta updates, observe
 file deletion/recreation, folder creation, durable pause, LAN policy checks and
 separate native NAS observation, remote directory renames and incoming-conflict
 recovery. Broader directory-tree deletion and conflict acceptance, never-observed
-head reconciliation, history reclamation, enrollment into an
+head reconciliation, NAS-side history reclamation, enrollment into an
 existing helper from another PC, and resumable setup transactions remain open.
 The wizard sets an 8 GiB per-file and per-batch limit (the protocol maximum).
 Content is streamed through disk-backed snapshots and delta spools; free local
