@@ -2,10 +2,17 @@
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
-from ananas_control_panel import Panel, Gtk, GLib, Gio, size
+from ananas_control_panel import Panel, Gtk, GLib, Gio, size, local_time
 
 
 class ProgressTests(unittest.TestCase):
+    def test_go_nanosecond_timestamps_and_missing_times(self):
+        self.assertEqual(local_time('2026-11-10T16:09:47.044721251Z'),
+                         local_time('2026-11-10T16:09:47Z'))
+        self.assertNotEqual(local_time('2026-11-10T16:09:47.044721251Z'), '—')
+        for value in (None, '', 'invalid'):
+            self.assertEqual(local_time(value), '—')
+
     def test_current_file_percentage_and_pending_count(self):
         item = dict(name='folder', path='folder', localBytes=1, syncedBytes=999, files=2, syncedFiles=1)
         self.assertEqual(Panel.row(None, item, 1)[2], '50.0% · 1 pending')
@@ -206,7 +213,7 @@ class PanelTests(unittest.TestCase):
         usage['children'].append(hidden)
         panel.storage_done(dict(capacity=dict(available=False), usage=usage), None)
         self.assertEqual(panel.model.iter_n_children(panel.model.get_iter_first()), 1)
-        self.assertEqual(panel.free.get_text(), 'NAS unavailable')
+        self.assertEqual(panel.free.get_text(), 'Space unavailable')
         # Expanding a directory enqueues work instead of doing I/O in GTK.
         panel.submit = Mock(return_value=True)
         panel.tree.expand_row(Gtk.TreePath.new_from_string('0:0'), False)
@@ -265,6 +272,52 @@ class PanelTests(unittest.TestCase):
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, allocation.width, allocation.height)
         panel.window.draw(cairo.Context(surface))
         surface.write_to_png('/tmp/ananas-control-panel-widget-test.png')
+        panel.window.destroy()
+
+    def test_storage_failure_preserves_live_status_and_recovers(self):
+        panel = self.panel
+        panel.last_capacity_text = None
+        panel.usage_summary = None
+        panel.storage_error = None
+        panel.build()
+        state = dict(paused=False, syncReason='Synchronizing', activePath='research/scratch/s.wfc')
+        panel.render(state, None)
+        panel.storage_done(None, 'Storage summary failed (HTTP 503). Local index time limit.')
+        self.assertTrue(panel.connected)
+        self.assertTrue(panel.pause.get_sensitive())
+        self.assertEqual(panel.headline.get_text(), 'Synchronizing')
+        self.assertIn(state['activePath'], panel.status_details.get_text())
+        self.assertIn('HTTP 503', panel.message.get_text())
+        self.assertIn('independently', panel.message.get_text())
+        self.assertEqual(panel.free.get_text(), 'Space unknown')
+        self.assertEqual(panel.tree_summary.get_text(), 'Folder sizes unavailable')
+        panel.render(None, 'connection refused')
+        self.assertIn('cannot be confirmed', panel.message.get_text())
+        self.assertIn('connection refused', panel.message.get_text())
+        self.assertIn('Synchronizing', panel.status_details.get_text())
+        panel.storage_done(None, 'storage timed out')
+        self.assertIn('cannot be confirmed', panel.message.get_text())
+        panel.render(state, None)
+        self.assertIn('storage timed out', panel.message.get_text())
+        usage = dict(name='NASdir', path='', localBytes=100, files=2, children=[])
+        data = dict(capacity=dict(available=True, free=900, used=100, total=1000, checkedAt='2026-11-10T16:00:00Z'), usage=usage)
+        panel.storage_done(data, None)
+        self.assertEqual(panel.message.get_text(), '')
+        self.assertIn('available', panel.free.get_text())
+        original_summary = panel.tree_summary.get_text()
+        original_rows = len(panel.model)
+        panel.storage_done(dict(capacity=data['capacity'], usageError='Local folder index time limit.'), None)
+        self.assertEqual(panel.free.get_text(), '900.0 B available')
+        self.assertEqual(len(panel.model), original_rows)
+        self.assertEqual(panel.tree_summary.get_text(), original_summary + ' · out of date')
+        self.assertIn('Folder sizes unavailable', panel.message.get_text())
+        panel.render(state, None)
+        self.assertIn('Folder sizes unavailable', panel.message.get_text())
+        panel.storage_done(data, None)
+        self.assertEqual(panel.message.get_text(), '')
+        self.assertEqual(panel.tree_summary.get_text(), original_summary)
+        panel.storage_done(None, 'request timed out')
+        self.assertIn('Last known: 900.0 B', panel.free.get_text())
         panel.window.destroy()
 
 

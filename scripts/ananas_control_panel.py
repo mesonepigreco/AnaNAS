@@ -29,8 +29,10 @@ def size(value):
 
 def local_time(value):
     try:
+        # Older system Python versions reject Go's nanosecond timestamps.
+        value = re.sub(r"(\.\d{6})\d+", r"\1", value)
         return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone().strftime("%d %b, %H:%M")
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, TypeError):
         return "—"
 
 
@@ -83,6 +85,10 @@ class Panel(Gtk.Application):
         self.window = None
         self.state = None
         self.connected = False
+        self.last_status_at = None
+        self.storage_error = None
+        self.last_capacity_text = None
+        self.usage_summary = None
         self.controlling = False
         self.jobs = queue.Queue(maxsize=8)
         self.stop = threading.Event()
@@ -171,6 +177,8 @@ class Panel(Gtk.Application):
         page.pack_start(self.location, False, False, 0)
         self.message = self.label("", "problem")
         self.message.set_line_wrap(True)
+        self.message.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self.message.set_max_width_chars(90)
         page.pack_start(self.message, False, False, 0)
 
         cards = Gtk.Box(spacing=14, homogeneous=True)
@@ -192,6 +200,7 @@ class Panel(Gtk.Application):
         folders = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=14)
         notebook.append_page(folders, Gtk.Label(label="Folder sizes"))
         self.tree_summary = self.label("Loading indexed folder sizes…", "section")
+        self.tree_summary.set_line_wrap(True)
         folder_header = Gtk.Box(spacing=12)
         folder_header.pack_start(self.tree_summary, True, True, 0)
         self.show_hidden = Gtk.CheckButton(label="Show hidden folders")
@@ -353,7 +362,12 @@ class Panel(Gtk.Application):
                 value = work()
             except Exception as exc:
                 print(f"Control panel request: {exc}", flush=True)
-                error = "Could not load information from anaNAS. Check the connection and refresh."
+                if isinstance(exc, TimeoutError):
+                    error = "The local background service did not answer within 5 seconds."
+                elif isinstance(exc, ConnectionRefusedError):
+                    error = "The local background service refused the connection."
+                else:
+                    error = str(exc).strip() or type(exc).__name__
             GLib.idle_add(done, value, error)
 
     def deliver(self, state, error):
@@ -396,11 +410,16 @@ class Panel(Gtk.Application):
         self.pending_buttons()
         if not self.connected:
             self.headline.set_text("Waiting for the background service")
-            self.status_details.set_text("")
-            self.message.set_text("anaNAS is reconnecting automatically. Previously displayed figures may be out of date.")
+            previous = ""
+            if self.state and self.last_status_at:
+                previous = f"Last confirmed status at {self.last_status_at:%H:%M:%S}: {self.state.get('syncReason', 'Connected')}"
+            self.status_details.set_text(previous)
+            self.message.set_text(f"Cannot refresh sync status: {error or 'no status received'}\n"
+                                  "Reconnecting automatically. Current sync activity cannot be confirmed; displayed figures may be out of date.")
             self.pause.set_sensitive(False)
             return False
         self.state = state
+        self.last_status_at = datetime.datetime.now().astimezone()
         self.resolve_button.set_visible(state.get('syncProblemsTotal', 0) > 0)
         if not self.notification_saving:
             self.notification_loading = True
@@ -409,7 +428,7 @@ class Panel(Gtk.Application):
         if self.problems.dialog is not None:
             self.problems.refresh()
         if not was_connected:
-            self.message.set_text("")
+            self.show_storage_error()
         reason = state.get("syncReason", "Connected")
         if state.get("paused"):
             title = "Synchronization paused"
@@ -420,7 +439,13 @@ class Panel(Gtk.Application):
         else:
             title = reason if len(reason) <= 45 and '\n' not in reason else "Synchronization status"
         self.headline.set_text(title)
-        self.status_details.set_text(reason if reason != title else "")
+        details = [reason] if reason != title else []
+        if state.get("activePath") and not state.get("paused"):
+            details.append("Working on: " + state["activePath"])
+        recent = state.get("recentUpdates") or []
+        if recent:
+            details.append("Last completed update: " + local_time(recent[0].get("at")) + " · " + recent[0].get("direction", ""))
+        self.status_details.set_text("\n".join(details))
         self.pause.set_label("Resume sync" if state.get("paused") else "Pause sync")
         self.pause.set_sensitive(not self.controlling)
         traffic = state.get("traffic", {})
@@ -458,10 +483,11 @@ class Panel(Gtk.Application):
             self.pause.set_sensitive(True)
 
     def refresh(self):
-        self.message.set_text("")
+        self.show_storage_error()
         self.submit(self.client.status, self.render)
         self.refresh_button.set_sensitive(False)
-        self.submit(lambda: self.client.storage(), self.storage_done)
+        if not self.submit(lambda: self.client.storage(), self.storage_done):
+            self.refresh_button.set_sensitive(True)
         if self.notebook.get_nth_page(self.notebook.get_current_page()) == self.pending_page:
             self.load_pending("")
 
@@ -524,24 +550,46 @@ class Panel(Gtk.Application):
             self.confirming = False
             self.pending_buttons()
 
+    def show_storage_error(self):
+        if not self.connected:
+            return
+        if self.storage_error:
+            self.message.set_text(self.storage_error + "\n"
+                                  "Sync runs independently of this summary. Refresh to retry.")
+        else:
+            self.message.set_text("")
+
     def storage_done(self, data, error):
         self.refresh_button.set_sensitive(True)
         if error:
-            self.message.set_text(error)
+            self.storage_error = "Could not refresh NAS space and folder sizes: " + error
+            self.free.set_text(("Last known: " + self.last_capacity_text) if self.last_capacity_text else "Space unknown")
+            self.capacity_note.set_text("Space figures could not be refreshed. See the request details above.")
+            self.tree_summary.set_text((self.usage_summary + " · out of date") if self.usage_summary else "Folder sizes unavailable")
+            self.show_storage_error()
             return False
+        self.storage_error = None
         cap = data["capacity"]
         if cap.get("available"):
-            self.free.set_text(size(cap["free"]) + " available")
+            self.last_capacity_text = size(cap["free"]) + " available"
+            self.free.set_text(self.last_capacity_text)
             self.capacity_note.set_text(f"{size(cap['used'])} used of {size(cap['total'])}\nChecked {local_time(cap['checkedAt'])}")
             self.capacity_bar.set_fraction(min(1, cap["used"] / max(1, cap["total"])))
         else:
-            self.free.set_text("NAS unavailable")
+            self.free.set_text("Space unavailable")
             self.capacity_note.set_text(cap.get("message", "Connect to the NAS network and refresh."))
             self.capacity_bar.set_fraction(0)
+        if data.get("usageError"):
+            self.storage_error = "Folder sizes unavailable: " + data["usageError"]
+            self.tree_summary.set_text((self.usage_summary + " · out of date") if self.usage_summary else "Folder sizes unavailable")
+            self.show_storage_error()
+            return False
+        self.show_storage_error()
         self.generation += 1
         self.model.clear()
         usage = data["usage"]
-        self.tree_summary.set_text(f"{size(usage['localBytes'])} on this computer · {usage['files']:,} files")
+        self.usage_summary = f"{size(usage['localBytes'])} on this computer · {usage['files']:,} files"
+        self.tree_summary.set_text(self.usage_summary)
         root = self.model.append(None, self.row(usage, usage["localBytes"], True))
         self.populate(root, usage)
         self.tree.expand_row(self.model.get_path(root), False)
@@ -594,7 +642,10 @@ class Panel(Gtk.Application):
             current = self.model.get_iter(reference.get_path())
             if error:
                 self.model[current][6] = False
-                self.message.set_text("Could not load this folder. Collapse it and expand it to try again.")
+                self.message.set_text("Could not load this folder: " + error + "\nCollapse it and expand it to try again.")
+            elif data.get("usageError"):
+                self.model[current][6] = False
+                self.message.set_text("Could not load this folder: " + data["usageError"] + "\nCollapse it and expand it to try again.")
             else:
                 self.populate(current, data["usage"])
             return False

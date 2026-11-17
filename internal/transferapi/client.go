@@ -93,22 +93,23 @@ func (e *RemoteError) Retryable() bool {
 }
 
 type Client struct {
-	opts             ClientOptions
-	exclusions       *exclude.Matcher
-	transport        *http.Transport
-	http             *http.Client
-	baseURL          string
-	mu               sync.Mutex
-	active, closed   bool
-	cancel           context.CancelFunc
-	watching         bool
-	watchCancel      context.CancelFunc
-	sent, received   atomic.Uint64
-	changes          chan struct{}
-	operationTimeout time.Duration
-	operationSlot    chan struct{}
-	source           func() (netip.Addr, error)
-	tls              *tls.Config
+	opts                ClientOptions
+	exclusions          *exclude.Matcher
+	transport           *http.Transport
+	http                *http.Client
+	baseURL             string
+	mu                  sync.Mutex
+	active, closed      bool
+	cancel              context.CancelFunc
+	watching            bool
+	watchCancel         context.CancelFunc
+	sent, received      atomic.Uint64
+	changes             chan struct{}
+	operationTimeout    time.Duration
+	downloadIdleTimeout time.Duration
+	operationSlot       chan struct{}
+	source              func() (netip.Addr, error)
+	tls                 *tls.Config
 }
 
 // NewInventoryReader uses an independent read-only transport and cancellation scope.
@@ -169,7 +170,7 @@ func NewClient(o ClientOptions) (*Client, error) {
 	// bounded content passes plus protocol overhead; metadata calls share the
 	// same finite context so one active request remains interruptible.
 	operationTimeout := transferTimeout(o.MaxBatchBytes, 2<<20)
-	c := &Client{opts: o, exclusions: m, baseURL: "https://" + o.Endpoint.String(), changes: make(chan struct{}, 1), operationTimeout: operationTimeout, operationSlot: make(chan struct{}, 1)}
+	c := &Client{opts: o, exclusions: m, baseURL: "https://" + o.Endpoint.String(), changes: make(chan struct{}, 1), operationTimeout: operationTimeout, downloadIdleTimeout: 2 * time.Minute, operationSlot: make(chan struct{}, 1)}
 	c.source = func() (netip.Addr, error) {
 		source := o.Source
 		if o.SourceFunc != nil {
@@ -574,10 +575,20 @@ func (c *Client) Download(ctx context.Context, sel Selection, want journal.Versi
 		return result, err
 	}
 	frame.Write(data)
-	r, err := c.request(ctx, http.MethodPost, "/v1/delta", &frame, int64(frame.Len()))
-	if err != nil {
-		return result, err
+	// The size-based operation budget allows hours for a large paced transfer;
+	// it must not allow a silent peer to hold the queue for that entire time.
+	downloadCtx, cancelDownload := context.WithCancel(ctx)
+	defer cancelDownload()
+	wait := downloadWait{cancel: cancelDownload, idle: c.downloadIdleTimeout}
+	finishWait := wait.start()
+	r, err := c.request(downloadCtx, http.MethodPost, "/v1/delta", &frame, int64(frame.Len()))
+	if err = finishWait(err); err != nil {
+		if r != nil {
+			r.Body.Close()
+		}
+		return result, fmt.Errorf("request NAS download %q: %w", sel.Path, err)
 	}
+	r.Body = downloadBody{ReadCloser: r.Body, wait: wait}
 	defer r.Body.Close()
 	if r.Header.Get("Content-Type") != "application/octet-stream" {
 		return result, fmt.Errorf("unexpected delta content type")

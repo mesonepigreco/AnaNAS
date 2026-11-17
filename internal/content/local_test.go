@@ -90,6 +90,13 @@ func TestChangedBytesNeverLeaveCandidateUnderOldDigest(t *testing.T) {
 	if b, err := c.ReadBlock(context.Background(), 0, make([]byte, 1024)); !errors.Is(err, ErrChanged) || b != nil {
 		t.Fatalf("changed bytes exposed: %d %v", len(b), err)
 	}
+	// The digest check above must reject changed bytes even if both writes fell
+	// in one filesystem timestamp tick. Give the following metadata-only checks
+	// a distinct timestamp instead of depending on the host's clock resolution.
+	modified := time.Unix(0, fp.MtimeNS).Add(time.Second)
+	if err := os.Chtimes(filepath.Join(dir, "file"), modified, modified); err != nil {
+		t.Fatal(err)
+	}
 	if err := c.Verify(); !errors.Is(err, ErrChanged) {
 		t.Fatal("changed fingerprint accepted", err)
 	}

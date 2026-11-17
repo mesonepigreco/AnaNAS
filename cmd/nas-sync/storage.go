@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"nas-sync/internal/config"
 	"nas-sync/internal/index"
 	"nas-sync/internal/languard"
@@ -28,15 +29,26 @@ type storageView struct {
 	cached capacity
 }
 
+type storageSnapshot struct {
+	Capacity   capacity     `json:"capacity"`
+	Usage      *index.Usage `json:"usage,omitempty"`
+	UsageError string       `json:"usageError,omitempty"`
+}
+
 func (s *storageView) snapshot(ctx context.Context, path string) (any, error) {
+	// Capacity must remain visible even when aggregating a large local index
+	// exhausts the request deadline. Never return incomplete usage totals.
+	result := storageSnapshot{Capacity: s.space(ctx)}
 	usage, err := s.db.DirectoryUsage(ctx, path)
 	if err != nil {
-		return nil, err
+		result.UsageError = "The local folder index could not be read. Refresh to retry."
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			result.UsageError = "Calculating indexed folder sizes exceeded the request time limit. Large indexes can take longer while syncing."
+		}
+		return result, nil
 	}
-	return struct {
-		Capacity capacity    `json:"capacity"`
-		Usage    index.Usage `json:"usage"`
-	}{s.space(ctx), usage}, nil
+	result.Usage = &usage
+	return result, nil
 }
 func (s *storageView) space(ctx context.Context) capacity {
 	s.mu.Lock()
@@ -44,10 +56,11 @@ func (s *storageView) space(ctx context.Context) capacity {
 	if time.Since(s.cached.CheckedAt) < 30*time.Second {
 		return s.cached
 	}
-	result := capacity{CheckedAt: time.Now(), Message: "NAS space is unavailable. Connect to the NAS network and refresh."}
+	result := capacity{CheckedAt: time.Now(), Message: "NAS space could not be checked because the configured share is not mounted and verified. Native synchronization uses a separate NAS connection."}
 	defer func() { s.cached = result }()
 	raw, err := os.ReadFile("/proc/self/mountinfo")
 	if err != nil {
+		result.Message = "The local mount table could not be read, so NAS space could not be verified."
 		return result
 	}
 	mounts, err := languard.ParseMounts(raw)
@@ -64,6 +77,10 @@ func (s *storageView) space(ctx context.Context) capacity {
 	command.WaitDelay = time.Second
 	data, err := command.Output()
 	if err != nil {
+		result.Message = "The mounted NAS share did not return space figures. Native synchronization uses a separate NAS connection."
+		if ctx.Err() != nil {
+			result.Message = "The NAS space check exceeded its time limit. The NAS may be busy; refresh to retry."
+		}
 		return result
 	}
 	values := strings.Fields(string(data))

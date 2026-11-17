@@ -203,8 +203,15 @@ class Client:
                          headers={"X-Nas-Sync-CSRF": token})
             response = conn.getresponse()
             data = response.read(2 * 1024 * 1024 + 1)
-            if response.status != 200 or len(data) > 2 * 1024 * 1024:
-                raise ValueError("Folder sizes could not be loaded. Please refresh.")
+            if response.status != 200:
+                detail = {
+                    403: "The control token was rejected; refresh to reconnect.",
+                    503: "The local folder index could not be summarized within the request time limit or could not be read.",
+                    504: "The storage summary exceeded the request time limit.",
+                }.get(response.status, "The local background service could not provide the storage summary.")
+                raise ValueError(f"Storage summary failed (HTTP {response.status}). {detail}")
+            if len(data) > 2 * 1024 * 1024:
+                raise ValueError("The storage summary exceeded the 2 MiB response limit. Open a smaller subfolder to inspect it.")
             return json.loads(data)
         finally:
             conn.close()

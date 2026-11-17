@@ -21,6 +21,9 @@ func TestContentTimeoutScalesAndWorkerRetriesOnlyRecoverableErrors(t *testing.T)
 	if !retryableWorkerError(context.DeadlineExceeded) {
 		t.Fatal("recoverable work was not retried")
 	}
+	if !retryableWorkerError(fmt.Errorf("receive NAS file %q: download stopped: %w", "data.npy", context.DeadlineExceeded)) {
+		t.Fatal("wrapped download timeout was not retried")
+	}
 	if retryableWorkerError(fmt.Errorf("content invariant failed")) {
 		t.Fatal("generic content failure was retried")
 	}

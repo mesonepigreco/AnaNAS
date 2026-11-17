@@ -85,6 +85,11 @@ capacity, indexed folder sizes and recent activity. Recent updates live in a
 submenu rather than crowding the main menu. Folder rows support double-click to
 open the file manager, and right-click to open the directory or a terminal there.
 Failed desktop actions do not falsely report a daemon crash.
+The status details show the current path and the last completed update. A slow
+folder-size summary reports its own time limit without implying sync has stopped;
+NAS space can still be shown when indexed folder sizes are unavailable. Retained
+figures are marked out of date, and a lost status connection shows the last
+confirmed status and explains that current activity cannot be confirmed.
 Indicator menu labels stay on one line and are shortened to 72 characters;
 long synchronization errors direct you to the control panel for full details.
 
@@ -166,6 +171,14 @@ absence against the retained version and continues. A recreated local file is
 preserved. Filesystem errors include operation/path context and are not treated
 as transient merely because the operating-system error type also supports network
 error methods.
+
+Downloads stop and retry automatically if the NAS sends no response data for two
+minutes while the PC is waiting for headers or reading the download stream. The
+status explains the timeout and names the affected file, including received and
+expected bytes when a stream was started. Slow transfers may exceed two minutes
+as long as reads keep progressing; local reconstruction and disk-write time do
+not count as a stalled network read. Partial downloads remain unconfirmed and
+follow the normal verified retry path.
 
 ## Configure your own PC and NAS
 

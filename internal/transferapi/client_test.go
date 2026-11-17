@@ -408,3 +408,81 @@ func TestTruncatedDownloadEOFIsRetryableAndPreservesNASFailure(t *testing.T) {
 		})
 	}
 }
+
+func TestStalledDownloadTimesOutAndReleasesOperationForRetry(t *testing.T) {
+	target := []byte("verified payload")
+	want := journal.Version{ID: identifier("stalled"), Size: int64(len(target)), Digest: hash.SumBytes(target)}
+	complete := encoded(t, nil, target)
+	base, err := delta.Build(context.Background(), bytes.NewReader(nil), 0, 64*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Cover a silent peer before headers, before the delta header, mid-stream,
+	// before verification, and after verification but before HTTP EOF.
+	for _, length := range []int{-1, 0, delta.HeaderBytes, len(complete) - 33, len(complete)} {
+		t.Run(fmt.Sprint(length), func(t *testing.T) {
+			var calls atomic.Int32
+			c := clientWithPeer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Type", "application/octet-stream")
+				if calls.Add(1) > 1 {
+					w.Write(complete)
+					return
+				}
+				if length >= 0 {
+					w.WriteHeader(http.StatusOK)
+					w.Write(complete[:length])
+					w.(http.Flusher).Flush()
+				}
+				<-r.Context().Done()
+			}))
+			c.downloadIdleTimeout = 100 * time.Millisecond
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			var out bytes.Buffer
+			_, err := c.Download(ctx, Selection{"folder/data.npy", want.ID}, want, base, nil, &out)
+			if ctx.Err() != nil || !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("stalled download must time out before the operation budget: %v (parent: %v)", err, ctx.Err())
+			}
+			if !strings.Contains(err.Error(), "folder/data.npy") || !strings.Contains(err.Error(), "no response data from the NAS") {
+				t.Fatal("missing actionable stall diagnostic", err)
+			}
+			out.Reset()
+			if _, err := c.Download(ctx, Selection{"folder/data.npy", want.ID}, want, base, nil, &out); err != nil || !bytes.Equal(out.Bytes(), target) {
+				t.Fatal("retry did not recover verified content", err)
+			}
+		})
+	}
+}
+
+func TestSlowDownloadKeepsMakingProgressBeyondIdleLimit(t *testing.T) {
+	target := bytes.Repeat([]byte("payload"), 4096)
+	want := journal.Version{ID: identifier("slow"), Size: int64(len(target)), Digest: hash.SumBytes(target)}
+	complete := encoded(t, nil, target)
+	base, err := delta.Build(context.Background(), bytes.NewReader(nil), 0, 64*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := clientWithPeer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/octet-stream")
+		for offset := 0; offset < len(complete); offset += 2048 {
+			if _, err := w.Write(complete[offset:min(offset+2048, len(complete))]); err != nil {
+				return
+			}
+			w.(http.Flusher).Flush()
+			time.Sleep(40 * time.Millisecond)
+		}
+	}))
+	c.downloadIdleTimeout = 250 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var out bytes.Buffer
+	started := time.Now()
+	if _, err := c.Download(ctx, Selection{"file", want.ID}, want, base, nil, &out); err != nil || !bytes.Equal(out.Bytes(), target) {
+		t.Fatal("healthy paced transfer interrupted", err)
+	}
+	if time.Since(started) <= c.downloadIdleTimeout {
+		t.Fatal("test did not exceed idle limit")
+	}
+}

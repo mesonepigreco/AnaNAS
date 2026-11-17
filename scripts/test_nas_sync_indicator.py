@@ -121,6 +121,19 @@ class IndicatorTests(unittest.TestCase):
             self.assertEqual(connection.port, 8721)
             self.assertEqual(connection.timeout, 5)
 
+    def test_storage_failures_identify_http_status_and_response_limit(self):
+        client = Client(8721)
+        for status, body, expected in ((503, b'unavailable', 'HTTP 503'),
+                                       (403, b'invalid token', 'token'),
+                                       (200, b'x' * (2 * 1024 * 1024 + 1), '2 MiB')):
+            with self.subTest(status=status), patch.object(client, 'token', return_value='a' * 64), \
+                    patch.object(client, 'connection') as connect:
+                response = connect.return_value.getresponse.return_value
+                response.status, response.read.return_value = status, body
+                with self.assertRaisesRegex(ValueError, expected):
+                    client.storage()
+                connect.return_value.close.assert_called_once()
+
     def test_bus_contract_parses(self):
         interfaces = Gio.DBusNodeInfo.new_for_xml(interface_xml()).interfaces
         self.assertEqual([i.name for i in interfaces], ["org.kde.StatusNotifierItem", "com.canonical.dbusmenu"])
