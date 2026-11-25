@@ -137,6 +137,11 @@ The candidate PC profile passed the live direct-LAN mount and route check.
 The updated helper and PC daemon were installed on an existing deployment.
 Both active profiles use the new ceiling. The helper passed preflight as its
 runtime user and both running executables matched the verified builds.
+A model file larger than 12 GiB, previously pending because of the 8 GiB limit,
+then synchronized automatically. The helper restarted during the first upload.
+The cause of that restart was not established. The PC retried using its
+prepared payload and acknowledged the file as added to the NAS. The byte
+counts and independent PC and native QNAP SHA-256 digests matched.
 
 The PC snapshot-maintenance change passed the full Go unit/race suites, vet,
 build and diff checks, including interrupted-removal recovery, conflict/inbox/
