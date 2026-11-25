@@ -223,11 +223,16 @@ class Client:
             try:
                 token = self.token()
                 conn.request("GET", "/api/events", headers={"X-Nas-Sync-CSRF": token})
+                # http.client drops conn.sock when the response will close the
+                # connection, but the response keeps reading from this socket.
+                sock = conn.sock
                 response = conn.getresponse()
                 if response.status != 200:
                     raise ValueError(f"Status stream unavailable (HTTP {response.status})")
                 # A quiet daemon emits nothing. There is no idle timeout/polling.
-                conn.sock.settimeout(None)
+                if sock is None:
+                    raise ValueError("Daemon status stream closed")
+                sock.settimeout(None)
                 while not stop.is_set():
                     line = response.readline(MAX_RESPONSE + 1)
                     if not line or len(line) > MAX_RESPONSE or not line.endswith(b"\n"):
@@ -240,6 +245,9 @@ class Client:
             except (OSError, ValueError, http.client.HTTPException) as error:
                 deliver(None, user_error(
                     "Cannot contact the anaNAS background service", error))
+            except Exception as error:  # noqa: BLE001 - never let the stream thread die
+                deliver(None, user_error(
+                    "Cannot contact the anaNAS background service", ValueError(str(error))))
             finally:
                 conn.close()
             stop.wait(delay)
