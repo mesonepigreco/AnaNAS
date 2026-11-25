@@ -48,7 +48,7 @@ func (s Sync) validate(c *Config) error {
 			return fmt.Errorf("sync requires a distinct private IPv4 source in the direct subnet")
 		}
 	}
-	if s.Port < 1024 || s.Port > 65535 || s.MaxFileBytes < 1 || s.MaxFileBytes > 8<<30 || s.MaxBatchBytes < s.MaxFileBytes || s.MaxBatchBytes > 8<<30 || s.MaxCacheEntries < 1 || s.MaxCacheEntries > 1_000_000 {
+	if s.Port < 1024 || s.Port > 65535 || s.MaxFileBytes < 1 || s.MaxFileBytes > manifest.MaxTransferBytes || s.MaxBatchBytes < s.MaxFileBytes || s.MaxBatchBytes > manifest.MaxTransferBytes || s.MaxCacheEntries < 1 || s.MaxCacheEntries > 1_000_000 {
 		return fmt.Errorf("sync requires bounded port, file, batch and cache entry settings")
 	}
 	for _, p := range []string{s.Certificate, s.PrivateKey, s.CA} {

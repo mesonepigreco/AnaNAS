@@ -10,6 +10,7 @@ import (
 	"nas-sync/internal/exclude"
 	"nas-sync/internal/index"
 	"nas-sync/internal/journal"
+	"nas-sync/internal/manifest"
 	"nas-sync/internal/stage"
 )
 
@@ -41,7 +42,7 @@ func NewPusher(db *index.DB, store *stage.Store, remote UploadRemote, o PushOpti
 	if db == nil || store == nil || remote == nil || o.Gate == nil {
 		return nil, fmt.Errorf("upload dependencies and policy gate required")
 	}
-	if o.MaxFileBytes < 1 || o.MaxFileBytes > 8<<30 || o.MaxBatchBytes < o.MaxFileBytes || o.MaxBatchBytes > 8<<30 || o.ReadBytesPerSecond < 1024 || o.ReadBytesPerSecond > 1<<30 {
+	if o.MaxFileBytes < 1 || o.MaxFileBytes > manifest.MaxTransferBytes || o.MaxBatchBytes < o.MaxFileBytes || o.MaxBatchBytes > manifest.MaxTransferBytes || o.ReadBytesPerSecond < 1024 || o.ReadBytesPerSecond > 1<<30 {
 		return nil, fmt.Errorf("bounded upload resource limits required")
 	}
 	m, err := changefeed.Patterns(o.Exclusions)

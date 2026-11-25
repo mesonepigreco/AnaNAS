@@ -38,7 +38,7 @@ func (r *Root) Snapshot(ctx context.Context, path string, want index.Fingerprint
 // exclusive; this method never adopts an existing ready object on retry.
 func (r *Root) SnapshotAs(ctx context.Context, path string, want index.Fingerprint, store *stage.Store, id string, bytesPerSecond int64) (Snapshot, error) {
 	var result Snapshot
-	if store == nil || !manifest.ValidID(id) || bytesPerSecond < 1024 || bytesPerSecond > 1<<30 || want.Size < 0 || want.Size > 8<<30 {
+	if store == nil || !manifest.ValidID(id) || bytesPerSecond < 1024 || bytesPerSecond > 1<<30 || want.Size < 0 || want.Size > manifest.MaxTransferBytes {
 		return result, fmt.Errorf("bounded snapshot and private store required")
 	}
 	if err := ctx.Err(); err != nil {

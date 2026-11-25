@@ -15,6 +15,7 @@ import (
 	"nas-sync/internal/hash"
 	"nas-sync/internal/index"
 	"nas-sync/internal/journal"
+	"nas-sync/internal/manifest"
 	"nas-sync/internal/publish"
 	"nas-sync/internal/stage"
 )
@@ -41,7 +42,7 @@ type Worker struct {
 }
 
 func New(db *index.DB, c *journal.Coordinator, p *publish.Publisher, s *stage.Store, maxFile int64, patterns []string, ready func() bool) (*Worker, error) {
-	if db == nil || c == nil || p == nil || s == nil || ready == nil || maxFile < 1 || maxFile > 8<<30 {
+	if db == nil || c == nil || p == nil || s == nil || ready == nil || maxFile < 1 || maxFile > manifest.MaxTransferBytes {
 		return nil, fmt.Errorf("native observation dependencies and file limit required")
 	}
 	if err := c.CheckStore(s); err != nil {

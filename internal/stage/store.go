@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 	"nas-sync/internal/delta"
 	"nas-sync/internal/hash"
+	"nas-sync/internal/manifest"
 )
 
 type Store struct{ fd int }
@@ -156,7 +157,7 @@ func (s *Store) Receive(ctx context.Context, id string, wire io.Reader, base io.
 // approved target metadata before sealing. It reuses the decoder's whole digest
 // rather than hashing every reconstructed byte again through a second writer.
 func (s *Store) ReceiveDeltaVerified(ctx context.Context, id string, wire io.Reader, base io.ReaderAt, baseSize int64, baseDigest hash.Digest, targetSize int64, targetDigest hash.Digest) (stats delta.Stats, err error) {
-	if targetSize < 0 || targetSize > 8<<30 {
+	if targetSize < 0 || targetSize > manifest.MaxTransferBytes {
 		return stats, fmt.Errorf("bounded target size required")
 	}
 	if err := ctx.Err(); err != nil {

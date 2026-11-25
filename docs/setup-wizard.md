@@ -78,9 +78,9 @@ by their profile's local root rather than accidentally opening the first root.
    new directory within the selection. Then choose a new/empty local destination.
    The non-admin runtime account and saved-mount credential option are under Advanced
    setup options. A folder already configured on this PC reuses its existing daemon
-   and certificates rather than attempting to install a second helper. No existing data is
-   merged into a non-empty PC folder during setup. Overlapping local/NAS sync roots
-   and existing helper installations are rejected.
+   and certificates. Selecting the exact NAS root managed by another PC offers
+   **Add this PC to this synchronized folder?** Choose a new or empty local
+   destination. Setup rejects overlapping sync roots.
 4. Review the exact NAS/PC paths and saved-credential consent. Installing mounting
    and boot autostart requires a separate **PC administrator** confirmation. This
    is distinct from the QNAP password. Runtime synchronization uses mutual TLS.
@@ -130,9 +130,9 @@ wizard does not invoke them.
   supplied password are not supported.
 - No accessible share or non-admin account: the wizard explains the needed QTS
   setup. It creates directories *within* shares, not new QTS SMB shares/accounts.
-- A directory already managed on another PC cannot yet be enrolled automatically.
-  Existing helper certificate allowlists and journal namespaces are preserved.
-  Management of the existing local profile works without a new NAS login.
+- Joining a managed NAS directory requires administrator login and a recognized
+  helper. The new PC inherits the helper's file and batch limits. Management
+  of an existing local profile works without a new NAS login.
 - Settings beyond root/runtime-account selection use the generated JSON profile;
   there is not yet a graphical exclusion editor, batch folder selection, password
   rotation, certificate renewal UI, or automatic partial-install recovery.
@@ -156,7 +156,7 @@ wizard does not invoke them.
   the daemon and the mount helper search the direct subnet for the pinned helper
   certificate; the mount is re-checked by a two-minute timer and remounted if the
   NAS moved. Interface or subnet changes still require configuration maintenance.
-- Engine limitations still apply: 8 GiB file/batch cap, unfinished general
+- Engine limitations still apply: 15 GiB file/batch cap, unfinished general
   directory deletion, conflict choices and broader reconciliation acceptance.
 - Automated checks cover QNAP-only identity filtering, friendly connection-error
   classification, configured-first ordering, nested-root shortcuts, bounded folder

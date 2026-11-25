@@ -15,6 +15,7 @@ import (
 	"nas-sync/internal/delta"
 	"nas-sync/internal/exclude"
 	"nas-sync/internal/journal"
+	"nas-sync/internal/manifest"
 	"nas-sync/internal/stage"
 )
 
@@ -57,7 +58,7 @@ func NewPuller(c *journal.Coordinator, store *stage.Store, publisher journal.Pub
 	if err := c.CheckStore(store); err != nil {
 		return nil, err
 	}
-	if o.MaxFileBytes < 1 || o.MaxFileBytes > 8<<30 || o.MaxBatchBytes < o.MaxFileBytes || o.MaxBatchBytes > 8<<30 || o.ReadBytesPerSecond < 1024 || o.ReadBytesPerSecond > 1<<30 {
+	if o.MaxFileBytes < 1 || o.MaxFileBytes > manifest.MaxTransferBytes || o.MaxBatchBytes < o.MaxFileBytes || o.MaxBatchBytes > manifest.MaxTransferBytes || o.ReadBytesPerSecond < 1024 || o.ReadBytesPerSecond > 1<<30 {
 		return nil, fmt.Errorf("bounded replica resource limits required")
 	}
 	m, err := changefeed.Patterns(o.Exclusions)

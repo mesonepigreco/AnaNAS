@@ -28,7 +28,7 @@ func (d *DB) FinalizeDownload(namespace string, sequence uint64, operation strin
 			return fmt.Errorf("fixed-block download manifest required")
 		}
 		blocks += len(m.Content.Blocks)
-		if blocks > manifest.MaxBlocks+journal.MaxEntries || m.Content.Size < 0 || m.Content.Size > (8<<30)-size {
+		if blocks > manifest.MaxBlocks+journal.MaxEntries || m.Content.Size < 0 || m.Content.Size > manifest.MaxTransferBytes-size {
 			return fmt.Errorf("download manifests exceed batch bound")
 		}
 		size += m.Content.Size

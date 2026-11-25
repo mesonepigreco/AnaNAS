@@ -43,7 +43,7 @@ func (p UploadPreparation) Validate() error {
 		v := journal.Version{ID: s.ID, Tombstone: s.Missing, Directory: !s.Missing && mode.IsDir()}
 		if !v.Tombstone && !v.Directory {
 			v.Size = s.Fingerprint.Size
-			if v.Size < 0 || v.Size > (8<<30)-total {
+			if v.Size < 0 || v.Size > manifest.MaxTransferBytes-total {
 				return fmt.Errorf("upload preparation exceeds content bound")
 			}
 			total += v.Size

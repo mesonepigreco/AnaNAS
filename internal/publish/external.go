@@ -12,6 +12,7 @@ import (
 	"nas-sync/internal/hash"
 	"nas-sync/internal/index"
 	"nas-sync/internal/journal"
+	"nas-sync/internal/manifest"
 	"nas-sync/internal/stage"
 )
 
@@ -67,7 +68,7 @@ func (p *Publisher) HashExternal(ctx context.Context, path string, want index.Fi
 // The compatible openat/mount/parent checks are shared with native publication.
 func (p *Publisher) CaptureExternal(ctx context.Context, e journal.Entry, want *index.Fingerprint, store *stage.Store, resume bool) (journal.Version, error) {
 	v := e.Next
-	if store == nil || v.Size < 0 || v.Size > 8<<30 {
+	if store == nil || v.Size < 0 || v.Size > manifest.MaxTransferBytes {
 		return v, fmt.Errorf("bounded file/directory external capture required")
 	}
 	if err := ctx.Err(); err != nil {

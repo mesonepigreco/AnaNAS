@@ -26,13 +26,17 @@ func TestWireBoundCoversEmptyLiteralAndMixedEncodings(t *testing.T) {
 			}
 		}
 	}
-	for _, size := range []int64{-1, (8 << 30) + 1} {
+	for _, size := range []int64{-1, (15 << 30) + 1} {
 		if _, err := WireBound(size); err == nil {
 			t.Fatal("invalid size accepted", size)
 		}
 	}
-	if bound, err := WireBound(8 << 30); err != nil || bound <= 8<<30 {
+	if bound, err := WireBound(15 << 30); err != nil || bound <= 15<<30 {
 		t.Fatal("large target bound overflowed", bound, err)
+	}
+	// Existing 8 GiB reservations bind this exact byte count to a durable token.
+	if bound, err := WireBound(8 << 30); err != nil || bound != (8<<30)+393217*45+HeaderBytes+33 {
+		t.Fatal("legacy wire reservation changed", bound, err)
 	}
 	if bound, err := WireBound(1); err != nil || bound > 256 {
 		t.Fatal("tiny target reserves global frame allowance", bound, err)

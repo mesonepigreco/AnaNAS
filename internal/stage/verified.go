@@ -8,6 +8,7 @@ import (
 
 	"github.com/zeebo/blake3"
 	"nas-sync/internal/hash"
+	"nas-sync/internal/manifest"
 )
 
 // ReceiveVerified gives a producer only a bounded sequential staging writer.
@@ -28,7 +29,7 @@ func (s *Store) Capture(ctx context.Context, id string, size int64, produce func
 }
 
 func (s *Store) capture(ctx context.Context, id string, size int64, expected *hash.Digest, produce func(io.Writer) error) (got hash.Digest, err error) {
-	if size < 0 || size > 8<<30 || produce == nil {
+	if size < 0 || size > manifest.MaxTransferBytes || produce == nil {
 		return got, fmt.Errorf("bounded size and content producer required")
 	}
 	err = s.receive(ctx, id, func(f *os.File) error {

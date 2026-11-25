@@ -83,7 +83,7 @@ func (u Upload) Validate() error {
 		if u.Generations[i] == 0 {
 			return fmt.Errorf("upload generation required")
 		}
-		if e.Next.Size > (8<<30)-total {
+		if e.Next.Size > manifest.MaxTransferBytes-total {
 			return fmt.Errorf("upload content exceeds batch bound")
 		}
 		total += e.Next.Size

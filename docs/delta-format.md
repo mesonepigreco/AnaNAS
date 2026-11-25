@@ -43,7 +43,7 @@ aggregate quota enforcement is implied by these file-level primitives.
 
 All integers are unsigned big-endian on the wire, validated before allocation.
 Digests are 32-byte BLAKE3. Block sizes are powers of two from 1 KiB to 4 MiB;
-both files are limited to 131,072 blocks (8 GiB at the default 64 KiB). Higher
+both files are limited to 245,760 blocks (15 GiB at the default 64 KiB). Higher
 block sizes raise that size bound and working-buffer cost; the scheduler must
 also enforce its configured per-file and aggregate spool limits.
 
@@ -52,7 +52,7 @@ also enforce its configured per-file and aggregate spool limits.
 The 56-byte header contains magic `NSSG0001`, block size (4 bytes), block count
 (4), base size (8), and whole-base digest (32). Each fixed-block entry contains
 a rolling weak checksum (4) and strong digest (32). Length/count checks happen
-before allocating entries. Maximum serialized size is 4,718,648 bytes.
+before allocating entries. Maximum serialized size is 8,847,416 bytes.
 
 The weak checksum packs the modulo-65,536 sum of bytes and weighted sum, with
 the first byte weighted by window length. Rolling updates are constant work.
@@ -76,7 +76,7 @@ The 60-byte header contains magic `NSDL0001`, block size (4 bytes), base size
 
 Each data frame contains at most one block. Copy offsets align to base blocks;
 a short copy must end at the base's end. A frame cannot exceed remaining target
-length. At most 393,217 data frames are accepted. Every reconstructed frame is
+length. Targets up to 8 GiB allow 393,217 data frames. Larger targets allow 737,281 frames. Every reconstructed frame is
 verified before writing to staging; exact total size, whole digest and EOF are
 required for success. The expected base identity comes from the caller's
 authenticated, versioned protocol, not an untrusted stream's claim alone.

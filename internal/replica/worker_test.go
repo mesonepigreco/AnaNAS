@@ -121,15 +121,15 @@ func TestMultiGiBSelectionAndBatchBoundaries(t *testing.T) {
 	_, db, _ := preparationFixture(t)
 	defer db.Close()
 	records := []index.Record{
-		{Path: "a", Fingerprint: index.Fingerprint{Size: 3<<30 + 17}},
-		{Path: "b", Fingerprint: index.Fingerprint{Size: 8 << 30}},
-		{Path: "c", Fingerprint: index.Fingerprint{Size: 8<<30 + 1}},
+		{Path: "a", Fingerprint: index.Fingerprint{Size: 13_631_779_296}},
+		{Path: "b", Fingerprint: index.Fingerprint{Size: 15 << 30}},
+		{Path: "c", Fingerprint: index.Fingerprint{Size: 15<<30 + 1}},
 		{Path: "d", Fingerprint: index.Fingerprint{Size: 1}},
 	}
 	if err := db.Put(records, false); err != nil {
 		t.Fatal(err)
 	}
-	w := &Worker{db: db, opts: WorkerOptions{PushOptions: PushOptions{MaxFileBytes: 8 << 30, MaxBatchBytes: 8 << 30}}}
+	w := &Worker{db: db, opts: WorkerOptions{PushOptions: PushOptions{MaxFileBytes: 15 << 30, MaxBatchBytes: 15 << 30}}}
 	cursor := ""
 	for _, want := range []string{"a", "b", "d"} {
 		paths, next, err := w.selectLocal(cursor)

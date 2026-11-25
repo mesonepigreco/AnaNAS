@@ -10,6 +10,7 @@ import (
 	"nas-sync/internal/delta"
 	"nas-sync/internal/hash"
 	"nas-sync/internal/journal"
+	"nas-sync/internal/manifest"
 	"nas-sync/internal/stage"
 )
 
@@ -20,7 +21,7 @@ import (
 func EncodeUpload(ctx context.Context, store *stage.Store, target journal.Version, base *delta.Signature, rate int64) (stage.WireInfo, delta.Stats, error) {
 	var info stage.WireInfo
 	var stats delta.Stats
-	if store == nil || rate < 1024 || rate > 1<<30 || target.Directory || target.Tombstone || target.Size > 8<<30 {
+	if store == nil || rate < 1024 || rate > 1<<30 || target.Directory || target.Tombstone || target.Size > manifest.MaxTransferBytes {
 		return info, stats, fmt.Errorf("bounded file snapshot and rate required")
 	}
 	if err := journal.ValidateVersion(target); err != nil {
@@ -29,7 +30,7 @@ func EncodeUpload(ctx context.Context, store *stage.Store, target journal.Versio
 	if err := base.Validate(); err != nil {
 		return info, stats, err
 	}
-	if base.BlockSize != 64*1024 || base.Size > 8<<30 {
+	if base.BlockSize != 64*1024 || base.Size > manifest.MaxTransferBytes {
 		return info, stats, fmt.Errorf("invalid upload base signature")
 	}
 	ctx, cancel := context.WithTimeout(ctx, contentTimeout(target.Size, rate))
@@ -65,7 +66,7 @@ func EncodeUpload(ctx context.Context, store *stage.Store, target journal.Versio
 // read-only handle positioned at zero. Verification is bounded and paced; no
 // wire object is trusted merely because its filename says ready.
 func OpenUploadWire(ctx context.Context, store *stage.Store, id string, want stage.WireInfo, rate int64) (io.ReadCloser, error) {
-	if store == nil || want.Size < delta.HeaderBytes+33 || want.Size > (8<<30)+int64(delta.MaxOperations)*45+delta.HeaderBytes+33 || rate < 1024 || rate > 1<<30 {
+	if store == nil || want.Size < delta.HeaderBytes+33 || want.Size > manifest.MaxTransferBytes+int64(delta.MaxOperations)*45+delta.HeaderBytes+33 || rate < 1024 || rate > 1<<30 {
 		return nil, fmt.Errorf("bounded wire verification required")
 	}
 	f, err := store.OpenWire(id)

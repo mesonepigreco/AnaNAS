@@ -122,7 +122,7 @@ func (c Config) Validate() error {
 	if c.Certificate == c.PrivateKey || c.ClientCA == c.PrivateKey {
 		return fmt.Errorf("private key must be separate from certificates")
 	}
-	if c.MaxConnections < 1 || c.MaxConnections > 8 || c.MaxFileBytes < 1 || c.MaxFileBytes > 8<<30 || c.MaxBatchBytes < c.MaxFileBytes || c.MaxBatchBytes > 8<<30 || c.ReadBytesPerSecond < 1024 || c.ReadBytesPerSecond > 1<<30 {
+	if c.MaxConnections < 1 || c.MaxConnections > 8 || c.MaxFileBytes < 1 || c.MaxFileBytes > manifest.MaxTransferBytes || c.MaxBatchBytes < c.MaxFileBytes || c.MaxBatchBytes > manifest.MaxTransferBytes || c.ReadBytesPerSecond < 1024 || c.ReadBytesPerSecond > 1<<30 {
 		return fmt.Errorf("bounded helper resource settings required")
 	}
 	if err := (journal.PublicationBudget{MaxBytes: c.MaxCacheBytes, MaxEntries: c.MaxCacheEntries}).Validate(); err != nil {

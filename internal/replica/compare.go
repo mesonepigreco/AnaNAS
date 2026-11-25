@@ -44,7 +44,7 @@ type Comparison struct {
 // publishes, deletes or records a conflict before its candidates are retained.
 func Compare(ctx context.Context, db *index.DB, root *content.Root, c *journal.Coordinator, remote ComparisonRemote, path string, o ComparisonOptions) (Comparison, error) {
 	var result Comparison
-	if db == nil || root == nil || c == nil || remote == nil || !manifest.ValidID(o.Namespace) || o.Gate == nil || o.MaxFileBytes < 1 || o.MaxFileBytes > 8<<30 || o.ReadBytesPerSecond < 1024 || o.ReadBytesPerSecond > 1<<30 {
+	if db == nil || root == nil || c == nil || remote == nil || !manifest.ValidID(o.Namespace) || o.Gate == nil || o.MaxFileBytes < 1 || o.MaxFileBytes > manifest.MaxTransferBytes || o.ReadBytesPerSecond < 1024 || o.ReadBytesPerSecond > 1<<30 {
 		return result, fmt.Errorf("bounded comparison dependencies and namespace required")
 	}
 	matcher, err := changefeed.Patterns(o.Exclusions)

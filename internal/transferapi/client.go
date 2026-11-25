@@ -157,7 +157,7 @@ func NewClient(o ClientOptions) (*Client, error) {
 	if o.Roots == nil || len(o.Certificate.Certificate) == 0 || o.Certificate.PrivateKey == nil || !manifest.ValidID(o.ServerFingerprint) || !manifest.ValidID(o.ClientID) || !manifest.ValidID(o.Namespace) || o.Gate == nil {
 		return nil, fmt.Errorf("trust, client certificate, server pin, client ID and policy gate required")
 	}
-	if o.MaxFileBytes < 1 || o.MaxFileBytes > 8<<30 || o.MaxBatchBytes < o.MaxFileBytes || o.MaxBatchBytes > 8<<30 {
+	if o.MaxFileBytes < 1 || o.MaxFileBytes > manifest.MaxTransferBytes || o.MaxBatchBytes < o.MaxFileBytes || o.MaxBatchBytes > manifest.MaxTransferBytes {
 		return nil, fmt.Errorf("bounded file and batch limits required")
 	}
 	o.Exclusions = append([]string(nil), o.Exclusions...)

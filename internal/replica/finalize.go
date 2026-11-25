@@ -28,7 +28,7 @@ func FinishUpload(ctx context.Context, db *index.DB, c *journal.Coordinator, sto
 	if db == nil || c == nil || store == nil || !manifest.ValidID(namespace) || !o.Writes || o.Gate == nil {
 		return fmt.Errorf("explicit upload completion dependencies required")
 	}
-	if o.MaxFileBytes < 1 || o.MaxFileBytes > 8<<30 || o.MaxBatchBytes < o.MaxFileBytes || o.MaxBatchBytes > 8<<30 || o.ReadBytesPerSecond < 1024 || o.ReadBytesPerSecond > 1<<30 {
+	if o.MaxFileBytes < 1 || o.MaxFileBytes > manifest.MaxTransferBytes || o.MaxBatchBytes < o.MaxFileBytes || o.MaxBatchBytes > manifest.MaxTransferBytes || o.ReadBytesPerSecond < 1024 || o.ReadBytesPerSecond > 1<<30 {
 		return fmt.Errorf("bounded upload completion limits required")
 	}
 	matcher, err := changefeed.Patterns(o.Exclusions)

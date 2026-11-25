@@ -58,8 +58,13 @@ are reported; the installer does not silently download or install dependencies.
 
 The installer builds the PC daemon and ARM64, ARMv7 and x86-64 NAS helpers, installs
 application files under `~/.local`, and enables the desktop indicator. Existing
-running daemons and configurations are preserved; an open control panel is closed
-so the next one starts with the updated code.
+profiles retain their settings and running sync daemons restart with the new
+binary. An open control panel is closed so the next one starts with the updated
+code. On another PC, select the already managed NAS folder in the wizard to
+enroll that PC. Its new profile inherits the helper's file and batch limits.
+For a previously enrolled PC, installing new binaries preserves its configured
+limits. To use a 15 GiB helper with that profile, set both `sync.maxFileBytes`
+and `sync.maxBatchBytes` to `16106127360` and restart its user service.
 
 Open **Set up QNAP / Manage sync folders** from the pineapple menu:
 
@@ -283,7 +288,7 @@ PYTHONWARNINGS=ignore /usr/bin/python3 -m unittest discover -s scripts -p test_a
 git diff --check
 ```
 
-Exercise an actual 3 GiB streaming encode/reconstruction without a disk fixture:
+Exercise a 15 GiB streaming encode/reconstruction without a disk fixture:
 
 ```sh
 ANANAS_LARGE_FILE_TEST=1 GOCACHE=/tmp/nas-sync-go-cache GOMODCACHE=/tmp/nas-sync-go-mod-cache go test ./internal/delta -run TestMultiGiBStreamingRoundTrip -count=1
@@ -298,9 +303,9 @@ The implementation includes regular-file synchronization, delta updates, observe
 file deletion/recreation, folder creation, durable pause, LAN policy checks and
 separate native NAS observation, remote directory renames and incoming-conflict
 recovery. Broader directory-tree deletion and conflict acceptance, never-observed
-head reconciliation, NAS-side history reclamation, enrollment into an
-existing helper from another PC, and resumable setup transactions remain open.
-The wizard sets an 8 GiB per-file and per-batch limit (the protocol maximum).
+head reconciliation, NAS-side history reclamation, broader multi-PC enrollment
+acceptance, and resumable setup transactions remain open.
+The wizard sets a 15 GiB per-file and per-batch limit (the protocol maximum).
 Content is streamed through disk-backed snapshots and delta spools; free local
 and NAS cache space is required. Helper certificates need renewal;
 there is not yet a renewal UI. Do not treat this as a backup replacement.

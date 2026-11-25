@@ -8,6 +8,7 @@ import (
 	bolt "go.etcd.io/bbolt"
 	"nas-sync/internal/delta"
 	"nas-sync/internal/hash"
+	"nas-sync/internal/manifest"
 )
 
 // Upload reservations bind operation/client/path/base/version/type/size. Content
@@ -22,7 +23,7 @@ func uploadCharge(p Proposal) ([]byte, int64, error) {
 	var total int64
 	for i := range p.Entries {
 		v := &p.Entries[i].Next
-		if v.Size > (8<<30)-total {
+		if v.Size > manifest.MaxTransferBytes-total {
 			return nil, 0, fmt.Errorf("upload cache reservation exceeds batch size")
 		}
 		total += v.Size

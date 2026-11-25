@@ -15,13 +15,13 @@ func (zeroSource) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// Opt in because this really hashes and transfers over three GiB through a
+// Opt in because this really hashes and transfers fifteen GiB through a
 // pipe. No whole-file allocation or multi-gigabyte fixture is needed.
 func TestMultiGiBStreamingRoundTrip(t *testing.T) {
 	if os.Getenv("ANANAS_LARGE_FILE_TEST") != "1" {
 		t.Skip("set ANANAS_LARGE_FILE_TEST=1 for the multi-GiB streaming test")
 	}
-	const size int64 = 3<<30 + 17
+	const size int64 = 15 << 30
 	ctx := context.Background()
 	base, err := Build(ctx, bytes.NewReader(nil), 0, 65536)
 	if err != nil {

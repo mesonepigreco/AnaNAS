@@ -419,7 +419,7 @@ class SetupTests(unittest.TestCase):
                 nas = json.loads(payloads[plan['base'] + '/helper.json'])
                 pc = json.loads((Path(plan['profile']) / 'config.json').read_bytes())
                 for key in ('maxFileBytes', 'maxBatchBytes'):
-                    self.assertEqual(nas[key], 8 << 30)
+                    self.assertEqual(nas[key], 15 << 30)
                     self.assertEqual(pc['sync'][key], nas[key])
                 self.assertEqual(nas['root'], '/share/Volume/Public/new-folder')
                 # DHCP may renumber the PC: authorize the direct subnet, not one lease.
@@ -454,7 +454,7 @@ class SetupTests(unittest.TestCase):
                       interface='eth0', prefix=route['prefix'], peers=['10.23.42.9'], uid=1000, gid=100, groups=[100],
                       certificate=base + '/server.pem', privateKey=base + '/server.key', clientCA=base + '/ca.pem',
                       clients={pins['client']: 'a' * 64}, exclusions=['@Recycle/'], maxConnections=2,
-                      maxFileBytes=8 << 30, maxBatchBytes=8 << 30, maxCacheBytes=1 << 40,
+                      maxFileBytes=15 << 30, maxBatchBytes=15 << 30, maxCacheBytes=1 << 40,
                       maxCacheEntries=1000000, readBytesPerSecond=1073741824)
         if locked:
             config['lockPeerAddresses'] = True

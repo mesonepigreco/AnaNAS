@@ -161,7 +161,7 @@ budget enabled and retains snapshot/history charges after completion. It now
 checks that completed spools are absent and retained snapshots remain available
 for subsequent diffs. Wire-bound tests exercise
 empty, literal and mixed copy/literal encodings from zero bytes to 512 KiB, plus
-size-limit arithmetic without allocating an 8 GiB fixture. A process-kill test
+size-limit arithmetic without allocating a 15 GiB fixture. A process-kill test
 stops after wire unlink/credit but before index finalization, then completes through
 the worker with no network implementation, preserving newer local edits and not
 crediting twice. Partial batch cleanup with an unowned hard link retains the full

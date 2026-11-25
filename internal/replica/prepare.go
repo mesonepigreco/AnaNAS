@@ -29,7 +29,7 @@ func PrepareUpload(ctx context.Context, db *index.DB, root *content.Root, c *jou
 	if db == nil || root == nil || c == nil || store == nil || remote == nil || !manifest.ValidID(namespace) || !o.Writes || o.Gate == nil || len(paths) < 1 || len(paths) > journal.MaxEntries {
 		return nil, nil, fmt.Errorf("explicit bounded upload preparation required")
 	}
-	if o.MaxFileBytes < 1 || o.MaxFileBytes > 8<<30 || o.MaxBatchBytes < o.MaxFileBytes || o.MaxBatchBytes > 8<<30 || o.ReadBytesPerSecond < 1024 || o.ReadBytesPerSecond > 1<<30 {
+	if o.MaxFileBytes < 1 || o.MaxFileBytes > manifest.MaxTransferBytes || o.MaxBatchBytes < o.MaxFileBytes || o.MaxBatchBytes > manifest.MaxTransferBytes || o.ReadBytesPerSecond < 1024 || o.ReadBytesPerSecond > 1<<30 {
 		return nil, nil, fmt.Errorf("bounded upload preparation limits required")
 	}
 	if err := c.CheckStore(store); err != nil {

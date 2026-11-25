@@ -102,8 +102,8 @@ func New(c *journal.Coordinator, s *stage.Store, p journal.Publisher, o Options)
 		clients[fp] = id
 	}
 	o.Clients = clients
-	if o.MaxFileBytes < 1 || o.MaxFileBytes > 8<<30 || o.MaxBatchBytes < o.MaxFileBytes || o.MaxBatchBytes > 8<<30 {
-		return nil, fmt.Errorf("file/batch byte bounds required (maximum 8 GiB)")
+	if o.MaxFileBytes < 1 || o.MaxFileBytes > manifest.MaxTransferBytes || o.MaxBatchBytes < o.MaxFileBytes || o.MaxBatchBytes > manifest.MaxTransferBytes {
+		return nil, fmt.Errorf("file/batch byte bounds required (maximum 15 GiB)")
 	}
 	if o.ReadBytesPerSecond < 1024 || o.ReadBytesPerSecond > 1<<30 {
 		return nil, fmt.Errorf("bounded transfer read rate required")

@@ -14,12 +14,12 @@ import (
 )
 
 const (
-	// MaxBlocks bounds one decoded manifest to roughly 5 MiB of block metadata.
-	// With the default 64 KiB blocks this permits files up to 8 GiB.
-	MaxBlocks      = 131072
-	headerSize     = 32
-	entrySize      = hash.DigestSize + 4
-	MaxEncodedSize = headerSize + 64 + entrySize*MaxBlocks
+	// MaxTransferBytes bounds a file or batch in the synchronization protocol.
+	MaxTransferBytes = 15 << 30
+	MaxBlocks        = MaxTransferBytes / (64 << 10)
+	headerSize       = 32
+	entrySize        = hash.DigestSize + 4
+	MaxEncodedSize   = headerSize + 64 + entrySize*MaxBlocks
 )
 
 // The header fixes both the format (1) and digest algorithm (1 = BLAKE3-256).

@@ -70,8 +70,8 @@ public repository. Public examples use fictitious values. See
   rate/history UI.
 - NAS-side history reclamation, current-base eviction/rehydration, metadata
   compaction and broader recovery/fault acceptance.
-- Ordinary-user onboarding, QTS share/account creation, and enrollment of another
-  PC into an existing helper without replacing its namespace or trust settings.
+- Ordinary-user onboarding, QTS share/account creation, and broader hardware
+  acceptance of enrollment into an existing helper.
 - Batch folder selection, graphical exclusions and resource customization.
 - Automatic recovery/resumption of interrupted setup; certificate/password rotation.
 - Fresh authenticated NAS setup, NAS reboot/remount and multi-folder end-to-end

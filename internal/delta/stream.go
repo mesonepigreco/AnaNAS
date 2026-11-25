@@ -18,6 +18,15 @@ const streamHeader = 60
 const HeaderBytes = streamHeader
 const MaxOperations = 3*manifest.MaxBlocks + 1
 
+// Preserve the frame budget used by durable upload reservations made before
+// targets above 8 GiB were supported.
+func operationLimit(size int64) int {
+	if size <= 8<<30 {
+		return 3*(1<<17) + 1
+	}
+	return MaxOperations
+}
+
 var ErrVerificationBudget = errors.New("rolling checksum verification budget exceeded; no automatic full-file fallback")
 
 // Header permits a bounded transport to reject mismatched target/base metadata
@@ -124,7 +133,7 @@ func Encode(ctx context.Context, src io.Reader, size int64, base *Signature, dst
 			return err
 		}
 		stats.Operations++
-		if stats.Operations > MaxOperations {
+		if stats.Operations > operationLimit(size) {
 			return fmt.Errorf("too many delta operations")
 		}
 		strong.Reset()
@@ -359,7 +368,7 @@ func Apply(ctx context.Context, wire io.Reader, base io.ReaderAt, baseSize int64
 			return stats, nil
 		}
 		stats.Operations++
-		if stats.Operations > MaxOperations {
+		if stats.Operations > operationLimit(int64(target)) {
 			return stats, fmt.Errorf("too many delta operations")
 		}
 		var n uint32

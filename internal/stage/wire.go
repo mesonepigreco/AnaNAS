@@ -9,6 +9,7 @@ import (
 	"github.com/zeebo/blake3"
 	"nas-sync/internal/delta"
 	"nas-sync/internal/hash"
+	"nas-sync/internal/manifest"
 )
 
 type WireInfo struct {
@@ -23,7 +24,7 @@ type WireInfo struct {
 // revalidate this object against that provenance after restart.
 func (s *Store) WriteWire(ctx context.Context, id string, maxBytes int64, produce func(io.Writer) error) (WireInfo, error) {
 	var info WireInfo
-	if maxBytes < delta.HeaderBytes+33 || maxBytes > (8<<30)+int64(delta.MaxOperations)*45+delta.HeaderBytes+33 || produce == nil {
+	if maxBytes < delta.HeaderBytes+33 || maxBytes > manifest.MaxTransferBytes+int64(delta.MaxOperations)*45+delta.HeaderBytes+33 || produce == nil {
 		return info, fmt.Errorf("bounded wire size and producer required")
 	}
 	err := s.receiveKind(ctx, id, ".wire", func(f *os.File) error {

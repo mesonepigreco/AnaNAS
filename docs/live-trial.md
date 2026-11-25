@@ -128,6 +128,16 @@ tests and long soak tests need separate, explicitly configured environments.
 
 ## Outstanding acceptance
 
+The 15 GiB file and batch limit passed the opt-in Go streaming round-trip test
+at the exact ceiling, including digest verification. Selection and reservation
+tests cover a model-sized file and rejection above the ceiling. The full Go
+unit and race suites passed, including the TLS transfer tests, as did
+`go vet ./...`, `go build ./...`, and Linux ARM64 and ARMv7 helper builds.
+The candidate PC profile passed the live direct-LAN mount and route check.
+The updated helper and PC daemon were installed on an existing deployment.
+Both active profiles use the new ceiling. The helper passed preflight as its
+runtime user and both running executables matched the verified builds.
+
 The PC snapshot-maintenance change passed the full Go unit/race suites, vet,
 build and diff checks, including interrupted-removal recovery, conflict/inbox/
 outbox pins, delta reuse and deletion after reclamation. On an existing profile,

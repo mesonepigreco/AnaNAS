@@ -227,7 +227,7 @@ daemon nor any automatic service invokes this puller.
 ## Local validation and remaining work
 
 The local index now has a one-batch upload outbox (`index.Upload`), capped at
-160 KiB of encoded metadata, with up to 128 entries and 8 GiB reconstructed
+160 KiB of encoded metadata, with up to 128 entries and 15 GiB reconstructed
 content. It retains the exact namespace/proposal, observed generations, delta
 lengths and spool digests before transmission; content/spools are retained
 separately. Preparation reserves room for the later commit receipt.
